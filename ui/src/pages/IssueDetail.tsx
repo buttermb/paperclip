@@ -79,6 +79,7 @@ import { IssueOutputSection } from "../components/issue-output/IssueOutputSectio
 import { isImageAttachment } from "../lib/issue-attachments";
 import { getPromotedOutputAttachmentIds } from "../lib/issue-output";
 import { IssueSiblingNavigation } from "../components/IssueSiblingNavigation";
+import type { MarkdownExternalReferenceMap } from "../components/MarkdownBody";
 import { IssuesList } from "../components/IssuesList";
 import { AgentIcon } from "../components/AgentIconPicker";
 import { IssueReferenceActivitySummary } from "../components/IssueReferenceActivitySummary";
@@ -744,6 +745,7 @@ type IssueDetailChatTabProps = {
   assigneeUserId: string | null;
   onResumeFromBacklog?: () => Promise<void> | void;
   resumeFromBacklogPending?: boolean;
+  externalReferences?: MarkdownExternalReferenceMap;
 };
 
 const IssueDetailChatTab = memo(function IssueDetailChatTab({
@@ -805,6 +807,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   assigneeUserId,
   onResumeFromBacklog,
   resumeFromBacklogPending,
+  externalReferences,
 }: IssueDetailChatTabProps) {
   // Conference Room Chat experimental flag (PAP-136/PAP-139): ON renders the
   // NUX thread (bubbles, metadata rows, composer chrome); OFF renders the
@@ -1029,6 +1032,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
         onResumeFromBacklog={onResumeFromBacklog}
         resumeFromBacklogPending={resumeFromBacklogPending}
         footer={footer}
+        externalReferences={externalReferences}
       />
     </div>
   );
@@ -1049,6 +1053,7 @@ type IssueDetailActivityTabProps = {
   onCheckMonitorNow: () => void;
   checkingMonitorNow: boolean;
   handoffFocusSignal?: number;
+  externalReferences?: MarkdownExternalReferenceMap;
 };
 
 function IssueDetailActivityTab({
@@ -1066,6 +1071,7 @@ function IssueDetailActivityTab({
   onCheckMonitorNow,
   checkingMonitorNow,
   handoffFocusSignal = 0,
+  externalReferences,
 }: IssueDetailActivityTabProps) {
   const { data: activity, isLoading: activityLoading } = useQuery({
     queryKey: queryKeys.issues.activity(issueId),
@@ -1267,6 +1273,11 @@ function IssueDetailActivityTab({
           }}
         />
       </div>
+      <IssueContinuationHandoff
+        document={continuationHandoff}
+        focusSignal={handoffFocusSignal}
+        externalReferences={externalReferences}
+      />
       {linkedApprovals && linkedApprovals.length > 0 && (
         <div className="mb-3 space-y-3">
           {linkedApprovals.map((approval) => (
@@ -1287,7 +1298,6 @@ function IssueDetailActivityTab({
           ))}
         </div>
       )}
-      <IssueContinuationHandoff document={continuationHandoff} focusSignal={handoffFocusSignal} />
       <IssueScheduledRetryCard issueId={issue.id} scheduledRetry={issue.scheduledRetry ?? null} />
       <IssueMonitorActivityCard
         issue={issue}
@@ -4060,6 +4070,7 @@ export function IssueDetail() {
         feedbackDataSharingPreference={feedbackDataSharingPreference}
         feedbackTermsUrl={FEEDBACK_TERMS_URL}
         mentions={mentionOptions}
+        externalReferences={externalObjectsState.markdownReferences}
         imageUploadHandler={async (file) => {
           const attachment = await uploadAttachment.mutateAsync(file);
           return attachment.contentPath;
@@ -4251,6 +4262,7 @@ export function IssueDetail() {
               resumeFromBacklogPending={
                 updateIssue.isPending && updateIssue.variables?.status === "todo"
               }
+              externalReferences={externalObjectsState.markdownReferences}
             />
           ) : null}
         </TabsContent>
@@ -4274,6 +4286,7 @@ export function IssueDetail() {
               }}
               onCheckMonitorNow={() => checkIssueMonitorNow.mutate()}
               checkingMonitorNow={checkIssueMonitorNow.isPending}
+              externalReferences={externalObjectsState.markdownReferences}
             />
           ) : null}
         </TabsContent>
