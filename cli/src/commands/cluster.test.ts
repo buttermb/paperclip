@@ -333,4 +333,85 @@ describe("cluster commands", () => {
     expect(code).not.toBe(0);
     expect(m.tenantPolicies.upsert).not.toHaveBeenCalled();
   });
+
+  it("set-cilium-policy: passes --cilium-dns and --cilium-cidrs through as arrays", async () => {
+    const m = mocks();
+    (m.tenantPolicies.upsert as any).mockResolvedValue({
+      clusterConnectionId: "c-1", companyId: "co-1",
+      quota: null, limitRange: null, additionalAllowFqdns: [], imageOverrides: null,
+      gitCredentialsSecretId: null,
+      ciliumDnsAllowlist: ["api.anthropic.com", "github.com"],
+      ciliumEgressCidrs: ["10.42.0.0/16"],
+      httpProxyUrl: null,
+    });
+    const cmd = createClusterCommand(m);
+    const code = await cmd.run([
+      "set-cilium-policy",
+      "--cluster", "c-1",
+      "--company", "co-1",
+      "--cilium-dns", "api.anthropic.com,github.com",
+      "--cilium-cidrs", "10.42.0.0/16",
+    ]);
+    expect(code).toBe(0);
+    const arg = (m.tenantPolicies.upsert as any).mock.calls[0][0];
+    expect(arg.ciliumDnsAllowlist).toEqual(["api.anthropic.com", "github.com"]);
+    expect(arg.ciliumEgressCidrs).toEqual(["10.42.0.0/16"]);
+    expect(arg.clusterConnectionId).toBe("c-1");
+    expect(arg.companyId).toBe("co-1");
+  });
+
+  it("set-cilium-policy: trims and ignores empty entries in comma lists", async () => {
+    const m = mocks();
+    (m.tenantPolicies.upsert as any).mockResolvedValue({
+      clusterConnectionId: "c-1", companyId: "co-1",
+      quota: null, limitRange: null, additionalAllowFqdns: [], imageOverrides: null,
+      gitCredentialsSecretId: null,
+      ciliumDnsAllowlist: ["api.anthropic.com"],
+      ciliumEgressCidrs: [],
+      httpProxyUrl: null,
+    });
+    const cmd = createClusterCommand(m);
+    const code = await cmd.run([
+      "set-cilium-policy",
+      "--cluster", "c-1",
+      "--company", "co-1",
+      "--cilium-dns", " api.anthropic.com , , ",
+      "--cilium-cidrs", "",
+    ]);
+    expect(code).toBe(0);
+    const arg = (m.tenantPolicies.upsert as any).mock.calls[0][0];
+    expect(arg.ciliumDnsAllowlist).toEqual(["api.anthropic.com"]);
+    expect(arg.ciliumEgressCidrs).toEqual([]);
+  });
+
+  it("set-cilium-policy: omits a flag entirely → preserve-on-omit (field undefined)", async () => {
+    const m = mocks();
+    (m.tenantPolicies.upsert as any).mockResolvedValue({
+      clusterConnectionId: "c-1", companyId: "co-1",
+      quota: null, limitRange: null, additionalAllowFqdns: [], imageOverrides: null,
+      gitCredentialsSecretId: null,
+      ciliumDnsAllowlist: [], ciliumEgressCidrs: [], httpProxyUrl: null,
+    });
+    const cmd = createClusterCommand(m);
+    const code = await cmd.run([
+      "set-cilium-policy",
+      "--cluster", "c-1",
+      "--company", "co-1",
+      "--cilium-dns", "api.anthropic.com",
+      // --cilium-cidrs omitted entirely
+    ]);
+    expect(code).toBe(0);
+    const arg = (m.tenantPolicies.upsert as any).mock.calls[0][0];
+    expect(arg.ciliumDnsAllowlist).toEqual(["api.anthropic.com"]);
+    // Undefined → service preserves existing on upsert (Task 2 semantics).
+    expect(arg.ciliumEgressCidrs).toBeUndefined();
+  });
+
+  it("set-cilium-policy: errors out if --cluster or --company is missing", async () => {
+    const m = mocks();
+    const cmd = createClusterCommand(m);
+    const code = await cmd.run(["set-cilium-policy", "--cluster", "c-1"]);
+    expect(code).not.toBe(0);
+    expect(m.tenantPolicies.upsert).not.toHaveBeenCalled();
+  });
 });

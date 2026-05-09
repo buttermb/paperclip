@@ -84,8 +84,21 @@ export interface TenantPolicyRow extends TenantPolicy {
   companyId: string;
 }
 
+export interface UpsertTenantPolicyInput {
+  clusterConnectionId: string;
+  companyId: string;
+  quota: Record<string, string | number | undefined> | null;
+  limitRange: Record<string, unknown> | null;
+  additionalAllowFqdns: string[];
+  imageOverrides: Record<string, string> | null;
+  gitCredentialsSecretId?: string;
+  ciliumDnsAllowlist?: string[];
+  ciliumEgressCidrs?: string[];
+}
+
 export interface ClusterTenantPoliciesService {
   get(clusterConnectionId: string, companyId: string): Promise<TenantPolicyRow | null>;
+  upsert(input: UpsertTenantPolicyInput): Promise<TenantPolicyRow>;
 }
 
 export interface EnsureTenantResult {
@@ -153,10 +166,11 @@ export function createClusterCommand(deps: ClusterCommandDeps): ClusterCommand {
         case "ensure-tenant": return cmdEnsureTenant(rest, deps);
         case "doctor":        return cmdDoctor(rest, deps);
         case "set-git-credentials": return cmdSetGitCredentials(rest, deps);
+        case "set-cilium-policy":   return cmdSetCiliumPolicy(rest, deps);
         default:
           deps.print(
             `Unknown subcommand: ${sub ?? "(none)"}\n` +
-            `Usage: cluster <add|list|test|remove|ensure-tenant|doctor|set-git-credentials>`,
+            `Usage: cluster <add|list|test|remove|ensure-tenant|doctor|set-git-credentials|set-cilium-policy>`,
           );
           return 2;
       }
@@ -435,5 +449,44 @@ async function cmdSetGitCredentials(argv: string[], deps: ClusterCommandDeps): P
     gitCredentialsSecretId: secretId,
   });
   deps.print(`Updated tenant policy: gitCredentialsSecretId=${secretId}`);
+  return 0;
+}
+
+async function cmdSetCiliumPolicy(argv: string[], deps: ClusterCommandDeps): Promise<number> {
+  const { flags } = parseFlags(argv);
+  const clusterId = flags["cluster"];
+  const companyId = flags["company"];
+  if (!clusterId || !companyId) {
+    deps.print(
+      "Usage: cluster set-cilium-policy --cluster <id> --company <id> " +
+        "[--cilium-dns \"a.com,b.com\"] [--cilium-cidrs \"10.0.0.0/8\"]",
+    );
+    return 2;
+  }
+
+  // Comma-list parsing: split, trim, drop empty entries. Caller passing
+  // --cilium-dns "" yields [] which clears the allowlist. Omitting a flag
+  // entirely yields undefined, which the service treats as preserve-on-omit.
+  const parseList = (raw: string | undefined): string[] | undefined => {
+    if (raw === undefined) return undefined;
+    return raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  };
+  const ciliumDnsAllowlist = parseList(flags["cilium-dns"]);
+  const ciliumEgressCidrs  = parseList(flags["cilium-cidrs"]);
+
+  const existing = await deps.tenantPolicies.get(clusterId, companyId);
+  await deps.tenantPolicies.upsert({
+    clusterConnectionId: clusterId,
+    companyId,
+    quota: existing?.quota ?? null,
+    limitRange: existing?.limitRange ?? null,
+    additionalAllowFqdns: existing?.additionalAllowFqdns ?? [],
+    imageOverrides: existing?.imageOverrides ?? null,
+    ciliumDnsAllowlist,
+    ciliumEgressCidrs,
+  });
+  const dnsLabel = ciliumDnsAllowlist === undefined ? "(unchanged)" : `[${ciliumDnsAllowlist.join(", ")}]`;
+  const cidrLabel = ciliumEgressCidrs === undefined ? "(unchanged)" : `[${ciliumEgressCidrs.join(", ")}]`;
+  deps.print(`Updated tenant Cilium DSL: dns=${dnsLabel} cidrs=${cidrLabel}`);
   return 0;
 }
