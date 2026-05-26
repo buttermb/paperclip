@@ -372,6 +372,75 @@ describe("realizeExecutionWorkspace", () => {
     expect(second.branchName).toBe(first.branchName);
   });
 
+  it("warns when reusing a git worktree whose base ref has advanced", async () => {
+    const repoRoot = await createTempRepo();
+
+    const initial = await realizeExecutionWorkspace({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: "main",
+      },
+      config: {
+        workspaceStrategy: {
+          type: "git_worktree",
+          branchTemplate: "{{issue.identifier}}-{{slug}}",
+        },
+      },
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-447",
+        title: "Add Worktree Support",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
+    });
+    expect(initial.baseRefSha).toMatch(/^[0-9a-f]{40}$/);
+
+    await fs.writeFile(path.join(repoRoot, "server-auth-fix.txt"), "cookie fix\n", "utf8");
+    await runGit(repoRoot, ["add", "server-auth-fix.txt"]);
+    await runGit(repoRoot, ["commit", "-m", "Add auth runtime fix"]);
+
+    const reused = await realizeExecutionWorkspace({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: "main",
+      },
+      config: {
+        workspaceStrategy: {
+          type: "git_worktree",
+          branchTemplate: "{{issue.identifier}}-{{slug}}",
+        },
+      },
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-447",
+        title: "Add Worktree Support",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
+    });
+
+    expect(reused.created).toBe(false);
+    expect(reused.cwd).toBe(initial.cwd);
+    expect(reused.warnings).toEqual([
+      expect.stringContaining("is behind main by 1 commit"),
+    ]);
+  });
+
   it("rejects reusing an empty directory that only looks like a worktree because it sits inside the repo", async () => {
     const repoRoot = await createTempRepo();
     const branchName = "PAP-447-add-worktree-support";
