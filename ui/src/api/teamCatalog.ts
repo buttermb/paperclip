@@ -20,7 +20,7 @@ export interface TeamCatalogListQuery {
  *
  * The preview/install bodies mirror `catalogTeamPreviewSchema` /
  * `catalogTeamInstallSchema` exactly. Several richer fields the Phase F design
- * imagined (per-source policy maps, secret values, skill-plan overrides) are not
+ * imagined (per-source policy maps, skill-plan overrides) are not
  * accepted by the shipped strict schema, so the UI derives those affordances
  * client-side and degrades gracefully — see TeamCatalog.tsx.
  */

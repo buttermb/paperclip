@@ -146,6 +146,7 @@ export const catalogTeamPreviewSchema = z.object({
 
 export const catalogTeamInstallSchema = catalogTeamPreviewSchema.extend({
   adapterOverrides: z.record(z.string().min(1), portabilityAdapterOverrideSchema).optional(),
+  secretValues: z.record(z.string().min(1), z.string()).optional(),
 });
 
 export const catalogTeamSkillPreparationSchema = z.object({

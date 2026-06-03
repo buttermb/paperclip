@@ -61,6 +61,7 @@ export interface CatalogTeamImportOptions {
   nameOverrides?: Record<string, string>;
   selectedFiles?: string[];
   adapterOverrides?: CompanyPortabilityImport["adapterOverrides"];
+  secretValues?: CompanyPortabilityImport["secretValues"];
   sourcePolicy?: CatalogTeamSourcePolicy;
   actor?: CatalogTeamActorContext | null;
 }
@@ -780,6 +781,7 @@ export function teamsCatalogService(db: Db) {
     const importInput: CompanyPortabilityImport = {
       ...buildPortabilityInput(companyId, prepared.source, options),
       adapterOverrides: options.adapterOverrides,
+      secretValues: options.secretValues,
     };
     const result = await portability.importBundle(
       importInput,

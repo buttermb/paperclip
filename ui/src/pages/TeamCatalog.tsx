@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "@/lib/router";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import type {
@@ -11,6 +11,8 @@ import type {
   CatalogTeamSourceRef,
   CatalogTeamTrustLevel,
   CatalogTeamCompatibility,
+  CatalogTeamImportOptions,
+  CatalogTeamInstallOptions,
   CatalogTeamInstallResult,
   CompanyPortabilityAdapterOverride,
   CompanyPortabilityCollisionStrategy,
@@ -83,6 +85,8 @@ import {
   Cpu,
   Crown,
   Download,
+  Eye,
+  EyeOff,
   FileText,
   Filter,
   Folder,
@@ -452,7 +456,7 @@ function TeamFileTree({
 // and group the remaining members — graceful degradation per design §7).
 // ---------------------------------------------------------------------------
 
-function TeamHierarchyPreview({ team }: { team: CatalogTeam }) {
+export function TeamHierarchyPreview({ team }: { team: CatalogTeam }) {
   const roots = new Set(team.rootAgentSlugs);
   const members = team.agentSlugs.filter((slug) => !roots.has(slug));
   const requiresManager = team.rootAgentSlugs.length > 0;
@@ -518,7 +522,7 @@ function MetricTile({
   );
 }
 
-function RequiredSkillsList({ skills }: { skills: CatalogTeamSkillRequirement[] }) {
+export function RequiredSkillsList({ skills }: { skills: CatalogTeamSkillRequirement[] }) {
   if (skills.length === 0) return <p className="text-sm text-muted-foreground">No required skills.</p>;
   return (
     <ul className="space-y-1">
@@ -547,7 +551,7 @@ function RequiredSkillsList({ skills }: { skills: CatalogTeamSkillRequirement[] 
   );
 }
 
-function EnvInputsList({ inputs }: { inputs: CatalogTeamEnvInputSummary[] }) {
+export function EnvInputsList({ inputs }: { inputs: CatalogTeamEnvInputSummary[] }) {
   if (inputs.length === 0) return null;
   return (
     <div className="space-y-1.5">
@@ -581,7 +585,13 @@ function EnvInputsList({ inputs }: { inputs: CatalogTeamEnvInputSummary[] }) {
   );
 }
 
-function ExternalSourcesList({ sources }: { sources: CatalogTeamSourceRef[] }) {
+function envInputFormKey(input: CatalogTeamEnvInputSummary) {
+  if (input.agentSlug) return `agent:${input.agentSlug}:${input.key}`;
+  if (input.projectSlug) return `project:${input.projectSlug}:${input.key}`;
+  return input.key;
+}
+
+export function ExternalSourcesList({ sources }: { sources: CatalogTeamSourceRef[] }) {
   const external = sources.filter((s) => s.type !== "include");
   const [open, setOpen] = useState(false);
   if (external.length === 0) return null;
@@ -802,16 +812,192 @@ const STEP_LABELS: Record<WizardStep, string> = {
   preview: "Preview",
 };
 
-function computeSteps(team: CatalogTeam): WizardStep[] {
+// `simplified` is the onboarding seam (design §6): the newly created company is
+// treated as a full-company-equivalent target, so the target-manager step is
+// dropped and source policy is never surfaced (onboarding only offers
+// markdown_only/assets teams). The skill plan collapses to a count and the
+// preview is minimal, but the skill step still renders when required skills
+// exist so resolution stays honest.
+function computeSteps(team: CatalogTeam, simplified = false): WizardStep[] {
   const steps: WizardStep[] = [];
-  if (team.rootAgentSlugs.length > 0) steps.push("target_manager");
-  if (team.sourceRefs.some((s) => sourceWarningCode(s) !== "ok")) steps.push("source_policy");
+  if (!simplified && team.rootAgentSlugs.length > 0) steps.push("target_manager");
+  if (!simplified && team.sourceRefs.some((s) => sourceWarningCode(s) !== "ok")) {
+    steps.push("source_policy");
+  }
   if (team.requiredSkills.length > 0) steps.push("skill_plan");
   steps.push("preview");
   return steps;
 }
 
 type ApplyPhase = "form" | "applying" | "done" | "error";
+
+// ---------------------------------------------------------------------------
+// Install hook — the onboarding seam (design §6 + §12.5).
+//
+// `useInstallTeamCatalogEntry` owns the preview/install engine: option building,
+// the two API mutations, and the resolved result/phase state. The installer
+// dialog drives it with operator-entered form state; a future onboarding step
+// can drive the same hook with `{ simplified: true }` and default form state to
+// run the collapsed, no-target-manager flow without any UI rework.
+// ---------------------------------------------------------------------------
+
+export interface TeamInstallFormState {
+  targetManagerAgentId: string | null;
+  fullCompany: boolean;
+  allowExternalSources: boolean;
+  allowUnpinnedOptionalSources: boolean;
+  allowLocalPathSources: boolean;
+  collisionStrategy: CompanyPortabilityCollisionStrategy;
+  /** slug -> renamed entity name */
+  nameOverrides: Record<string, string>;
+  /** slug -> adapterType override */
+  adapterOverrides: Record<string, string>;
+  /** scoped env input key -> operator-entered value */
+  secretValues: Record<string, string>;
+}
+
+export const EMPTY_INSTALL_FORM: TeamInstallFormState = {
+  targetManagerAgentId: null,
+  fullCompany: false,
+  allowExternalSources: false,
+  allowUnpinnedOptionalSources: false,
+  allowLocalPathSources: false,
+  collisionStrategy: "rename",
+  nameOverrides: {},
+  adapterOverrides: {},
+  secretValues: {},
+};
+
+export interface UseInstallTeamCatalogEntryOptions {
+  companyId: string;
+  team: CatalogTeam;
+  /**
+   * Run the simplified onboarding flow: no target-manager step, source policy
+   * never surfaced, collapsed preview. The company is treated as a
+   * full-company-equivalent target (`targetManagerAgentId: null`).
+   */
+  simplified?: boolean;
+  onInstalled?: (result: CatalogTeamInstallResult) => void;
+}
+
+export interface UseInstallTeamCatalogEntryResult {
+  simplified: boolean;
+  steps: WizardStep[];
+  phase: ApplyPhase;
+  setPhase: (phase: ApplyPhase) => void;
+  previewResult: CatalogTeamImportPreviewResult | null;
+  previewError: string | null;
+  isPreviewing: boolean;
+  installResult: CatalogTeamInstallResult | null;
+  applyError: string | null;
+  runPreview: (form: TeamInstallFormState) => void;
+  runInstall: (form: TeamInstallFormState) => void;
+  buildPreviewOptions: (form: TeamInstallFormState) => CatalogTeamImportOptions;
+  buildInstallOptions: (form: TeamInstallFormState) => CatalogTeamInstallOptions;
+  reset: () => void;
+}
+
+export function useInstallTeamCatalogEntry({
+  companyId,
+  team,
+  simplified = false,
+  onInstalled,
+}: UseInstallTeamCatalogEntryOptions): UseInstallTeamCatalogEntryResult {
+  const [phase, setPhase] = useState<ApplyPhase>("form");
+  const [previewResult, setPreviewResult] = useState<CatalogTeamImportPreviewResult | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [installResult, setInstallResult] = useState<CatalogTeamInstallResult | null>(null);
+  const [applyError, setApplyError] = useState<string | null>(null);
+
+  const steps = useMemo(() => computeSteps(team, simplified), [team, simplified]);
+
+  // Preview body — the preview schema is strict and does NOT accept adapterOverrides.
+  const buildPreviewOptions = useCallback(
+    (form: TeamInstallFormState): CatalogTeamImportOptions => ({
+      targetManagerAgentId: simplified || form.fullCompany ? null : form.targetManagerAgentId,
+      collisionStrategy: form.collisionStrategy,
+      nameOverrides:
+        Object.keys(form.nameOverrides).length > 0 ? form.nameOverrides : undefined,
+      sourcePolicy: {
+        allowExternalSources: form.allowExternalSources,
+        allowUnpinnedOptionalSources: form.allowUnpinnedOptionalSources,
+        allowLocalPathSources: form.allowLocalPathSources,
+      },
+    }),
+    [simplified],
+  );
+
+  // Install body extends the preview body with adapterOverrides.
+  const buildInstallOptions = useCallback(
+    (form: TeamInstallFormState): CatalogTeamInstallOptions => {
+      const overrides: Record<string, CompanyPortabilityAdapterOverride> = {};
+      for (const [slug, adapterType] of Object.entries(form.adapterOverrides)) {
+        if (adapterType) overrides[slug] = { adapterType };
+      }
+      return {
+        ...buildPreviewOptions(form),
+        adapterOverrides: Object.keys(overrides).length > 0 ? overrides : undefined,
+        secretValues: Object.keys(form.secretValues).length > 0 ? form.secretValues : undefined,
+      };
+    },
+    [buildPreviewOptions],
+  );
+
+  const previewMutation = useMutation({
+    mutationFn: (form: TeamInstallFormState) =>
+      teamCatalogApi.preview(companyId, team.id, buildPreviewOptions(form)),
+    onSuccess: (result) => {
+      setPreviewResult(result);
+      setPreviewError(null);
+    },
+    onError: (error) => {
+      setPreviewError(error instanceof Error ? error.message : "Failed to load install preview.");
+    },
+  });
+
+  const installMutation = useMutation({
+    mutationFn: (form: TeamInstallFormState) =>
+      teamCatalogApi.install(companyId, team.id, buildInstallOptions(form)),
+    onMutate: () => {
+      setPhase("applying");
+      setApplyError(null);
+    },
+    onSuccess: (result) => {
+      setInstallResult(result);
+      setPhase("done");
+      onInstalled?.(result);
+    },
+    onError: (error) => {
+      setPhase("error");
+      setApplyError(error instanceof Error ? error.message : "Install failed.");
+    },
+  });
+
+  const reset = useCallback(() => {
+    setPhase("form");
+    setPreviewResult(null);
+    setPreviewError(null);
+    setInstallResult(null);
+    setApplyError(null);
+  }, []);
+
+  return {
+    simplified,
+    steps,
+    phase,
+    setPhase,
+    previewResult,
+    previewError,
+    isPreviewing: previewMutation.isPending,
+    installResult,
+    applyError,
+    runPreview: previewMutation.mutate,
+    runInstall: installMutation.mutate,
+    buildPreviewOptions,
+    buildInstallOptions,
+    reset,
+  };
+}
 
 function TeamInstallerDialog({
   team,
@@ -847,6 +1033,8 @@ function TeamInstallerDialog({
   const [nameOverrides, setNameOverrides] = useState<Record<string, string>>({});
   // slug -> adapterType override (the install schema accepts adapterOverrides).
   const [adapterOverrides, setAdapterOverrides] = useState<Record<string, string>>({});
+  const [secretValues, setSecretValues] = useState<Record<string, string>>({});
+  const [visibleSecretKeys, setVisibleSecretKeys] = useState<Record<string, boolean>>({});
   const [confirmScripts, setConfirmScripts] = useState(false);
 
   const [previewResult, setPreviewResult] = useState<CatalogTeamImportPreviewResult | null>(null);
@@ -867,6 +1055,8 @@ function TeamInstallerDialog({
       setCollisionStrategy("rename");
       setNameOverrides({});
       setAdapterOverrides({});
+      setSecretValues({});
+      setVisibleSecretKeys({});
       setConfirmScripts(false);
       setPreviewResult(null);
       setPreviewError(null);
@@ -895,9 +1085,13 @@ function TeamInstallerDialog({
     for (const [slug, adapterType] of Object.entries(adapterOverrides)) {
       if (adapterType) overrides[slug] = { adapterType };
     }
+    const enteredSecretValues = Object.fromEntries(
+      Object.entries(secretValues).filter(([, value]) => value.trim().length > 0),
+    );
     return {
       ...buildPreviewOptions(),
       adapterOverrides: Object.keys(overrides).length > 0 ? overrides : undefined,
+      secretValues: Object.keys(enteredSecretValues).length > 0 ? enteredSecretValues : undefined,
     };
   };
 
@@ -955,6 +1149,10 @@ function TeamInstallerDialog({
 
   const hasErrors = (previewResult?.errors.length ?? 0) > 0;
   const blockedCount = previewResult?.errors.length ?? 0;
+  const missingRequiredSecretInputs = (previewResult?.portabilityPreview.envInputs ?? [])
+    .filter((input) => input.requirement === "required" && (secretValues[envInputFormKey(input)] ?? "").trim().length === 0);
+  const missingRequiredSecretCount = missingRequiredSecretInputs.length;
+  const installBlocked = hasErrors || missingRequiredSecretCount > 0;
   const needsScriptsConfirm = team.trustLevel === "scripts_executables";
 
   function goNext() {
@@ -1047,6 +1245,10 @@ function TeamInstallerDialog({
                 onRename={(slug, name) => setNameOverrides((cur) => ({ ...cur, [slug]: name }))}
                 adapterOverrides={adapterOverrides}
                 onAdapterChange={(slug, adapterType) => setAdapterOverrides((cur) => ({ ...cur, [slug]: adapterType }))}
+                secretValues={secretValues}
+                visibleSecretKeys={visibleSecretKeys}
+                onSecretChange={(key, value) => setSecretValues((cur) => ({ ...cur, [key]: value }))}
+                onToggleSecretVisibility={(key) => setVisibleSecretKeys((cur) => ({ ...cur, [key]: !cur[key] }))}
                 onRetry={() => previewMutation.mutate()}
               />
             )}
@@ -1088,14 +1290,19 @@ function TeamInstallerDialog({
               Install blocked: {blockedCount} error{blockedCount === 1 ? "" : "s"}
             </span>
           )}
+          {currentStep === "preview" && !hasErrors && missingRequiredSecretCount > 0 && (
+            <span className="text-xs text-rose-600 dark:text-rose-300">
+              Required secrets missing: {missingRequiredSecretCount}
+            </span>
+          )}
           {currentStep === "preview" ? (
             needsScriptsConfirm && confirmScripts ? (
-              <Button variant="destructive" onClick={submitInstall} disabled={hasErrors || previewMutation.isPending}>
+              <Button variant="destructive" onClick={submitInstall} disabled={installBlocked || previewMutation.isPending}>
                 <AlertTriangle className="h-4 w-4" />
                 Confirm — install with executables
               </Button>
             ) : (
-              <Button onClick={submitInstall} disabled={hasErrors || previewMutation.isPending || !previewResult}>
+              <Button onClick={submitInstall} disabled={installBlocked || previewMutation.isPending || !previewResult}>
                 {needsScriptsConfirm ? <AlertTriangle className="h-4 w-4" /> : <Download className="h-4 w-4" />}
                 {needsScriptsConfirm ? "Install with executables" : "Install team"}
               </Button>
@@ -1456,6 +1663,10 @@ export function StepPreview({
   onRename,
   adapterOverrides,
   onAdapterChange,
+  secretValues = {},
+  visibleSecretKeys = {},
+  onSecretChange = () => {},
+  onToggleSecretVisibility = () => {},
   onRetry,
 }: {
   team: CatalogTeam;
@@ -1468,6 +1679,10 @@ export function StepPreview({
   onRename: (slug: string, name: string) => void;
   adapterOverrides: Record<string, string>;
   onAdapterChange: (slug: string, adapterType: string) => void;
+  secretValues?: Record<string, string>;
+  visibleSecretKeys?: Record<string, boolean>;
+  onSecretChange?: (key: string, value: string) => void;
+  onToggleSecretVisibility?: (key: string) => void;
   onRetry: () => void;
 }) {
   if (loading && !result) {
@@ -1616,33 +1831,58 @@ export function StepPreview({
         </PreviewSection>
       )}
 
-      {/* Env inputs (read-only — install schema does not yet accept secretValues) */}
+      {/* Env inputs */}
       {envInputs.length > 0 && (
         <PreviewSection title={`Secrets & env inputs · ${envInputs.length}`}>
-          {envInputs.map((input) => (
-            <li key={input.key} className="flex items-center gap-2 px-3 py-2 text-sm">
-              <KeyRound className="h-3.5 w-3.5 text-muted-foreground" />
-              <span className="font-mono text-xs uppercase tracking-wide">{input.key}</span>
-              {input.description && <span className="text-xs text-muted-foreground">{input.description}</span>}
-              {input.requirement === "required" && (
-                <Badge variant="outline" className="text-[10px]">required</Badge>
-              )}
-              <Badge
-                variant="outline"
-                className={cn("ml-auto text-[10px]", input.kind === "secret" ? "text-rose-600 dark:text-rose-300 border-rose-500/30" : "text-muted-foreground")}
-              >
-                {input.kind}
-              </Badge>
-            </li>
-          ))}
-          <li className="flex items-start gap-1.5 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300">
-            <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-            <span>
-              The teams-catalog install API does not yet accept secret values, so these are listed
-              read-only and must be set on each imported agent after install. Inline entry is tracked
-              in the Phase E follow-up (see comment).
-            </span>
-          </li>
+          {envInputs.map((input) => {
+            const formKey = envInputFormKey(input);
+            const visible = Boolean(visibleSecretKeys[formKey]);
+            const missingRequired = input.requirement === "required" && (secretValues[formKey] ?? "").trim().length === 0;
+            return (
+              <li key={formKey} className="grid gap-2 px-3 py-2 text-sm sm:grid-cols-[minmax(0,1fr)_minmax(14rem,18rem)] sm:items-center">
+                <div className="flex min-w-0 items-center gap-2">
+                  <KeyRound className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span className="font-mono text-xs uppercase tracking-wide">{input.key}</span>
+                  {input.description && <span className="truncate text-xs text-muted-foreground">{input.description}</span>}
+                  {input.requirement === "required" && (
+                    <Badge variant="outline" className="text-[10px]">required</Badge>
+                  )}
+                  <Badge
+                    variant="outline"
+                    className={cn("ml-auto text-[10px]", input.kind === "secret" ? "text-rose-600 dark:text-rose-300 border-rose-500/30" : "text-muted-foreground")}
+                  >
+                    {input.kind}
+                  </Badge>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <Input
+                    type={visible ? "text" : "password"}
+                    value={secretValues[formKey] ?? ""}
+                    onChange={(event) => onSecretChange(formKey, event.target.value)}
+                    placeholder={input.requirement === "required" ? "Required" : "Optional"}
+                    aria-label={`${input.key} value`}
+                    aria-invalid={missingRequired || undefined}
+                    className={cn("h-8 min-w-0", missingRequired && "border-rose-500/60 focus-visible:ring-rose-500/30")}
+                  />
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        className="h-8 w-8"
+                        onClick={() => onToggleSecretVisibility(formKey)}
+                        aria-label={visible ? `Hide ${input.key}` : `Show ${input.key}`}
+                      >
+                        {visible ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>{visible ? "Hide value" : "Show value"}</TooltipContent>
+                  </Tooltip>
+                </div>
+              </li>
+            );
+          })}
         </PreviewSection>
       )}
 
@@ -1796,6 +2036,65 @@ export function TeamRow({
         </span>
         <TrustChip level={team.trustLevel} iconOnly />
       </div>
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// TeamCard — square tile for the onboarding "Pick a starter team" grid
+// (design §6 + §12.5). Rendered in a 3-col grid of `defaultInstall` bundled
+// teams. Selection is owned by the parent (the onboarding step) so the same
+// tile works for the future live flow without rework.
+// ---------------------------------------------------------------------------
+
+export function TeamCard({
+  team,
+  selected = false,
+  onSelect,
+}: {
+  team: CatalogTeam;
+  selected?: boolean;
+  onSelect?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={selected}
+      className={cn(
+        "flex aspect-square w-full flex-col gap-2 rounded-lg border border-border bg-card p-4 text-left transition-colors hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        selected && "ring-2 ring-ring",
+      )}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <span className="flex h-8 w-8 items-center justify-center rounded-md border border-border bg-background">
+          <Users2 className="h-4 w-4 text-muted-foreground" />
+        </span>
+        {team.trustLevel !== "markdown_only" && <TrustChip level={team.trustLevel} iconOnly />}
+      </div>
+
+      <div className="space-y-0.5">
+        <h3 className="text-sm font-semibold leading-snug">{team.name}</h3>
+        <p className="text-xs text-muted-foreground">
+          {team.counts.agents} agent{team.counts.agents === 1 ? "" : "s"} ·{" "}
+          {team.counts.projects} project{team.counts.projects === 1 ? "" : "s"} ·{" "}
+          {team.counts.routines} routine{team.counts.routines === 1 ? "" : "s"}
+        </p>
+      </div>
+
+      {team.description && (
+        <p className="line-clamp-3 text-xs text-muted-foreground">{team.description}</p>
+      )}
+
+      {team.tags.length > 0 && (
+        <div className="mt-auto flex flex-wrap gap-1">
+          {team.tags.map((tag) => (
+            <Badge key={tag} variant="outline" className="text-[10px]">
+              {tag}
+            </Badge>
+          ))}
+        </div>
+      )}
     </button>
   );
 }

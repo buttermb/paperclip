@@ -204,7 +204,10 @@ describe("teams catalog routes", () => {
 
     const res = await request(app)
       .post(`/api/companies/${companyId}/teams/catalog/product-engineering/install`)
-      .send({ collisionStrategy: "rename" });
+      .send({
+        collisionStrategy: "rename",
+        secretValues: { "agent:cto:OPENAI_API_KEY": "sk-test" },
+      });
 
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(mockTeamsCatalogService.installCatalogTeam).toHaveBeenCalledWith(
@@ -212,6 +215,7 @@ describe("teams catalog routes", () => {
       "product-engineering",
       expect.objectContaining({
         collisionStrategy: "rename",
+        secretValues: { "agent:cto:OPENAI_API_KEY": "sk-test" },
         actor: expect.objectContaining({
           actorType: "agent",
           actorId: "agent-1",

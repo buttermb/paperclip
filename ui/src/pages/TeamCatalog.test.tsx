@@ -181,6 +181,12 @@ function makePreview(): CatalogTeamImportPreviewResult {
   };
 }
 
+function setInputValue(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+  setter?.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 function findButton(label: string): HTMLButtonElement | undefined {
   return Array.from(document.querySelectorAll("button")).find((b) =>
     (b.textContent ?? "").includes(label),
@@ -278,6 +284,60 @@ describe("TeamCatalog install preview path", () => {
 
     expect(mockTeamCatalogApi.install).toHaveBeenCalledTimes(1);
     expect(document.body.textContent).toContain("Team installed");
+  });
+
+  it("requires and submits Step 4 secret values", async () => {
+    const preview = makePreview();
+    preview.portabilityPreview.envInputs = [
+      {
+        key: "OPENAI_API_KEY",
+        description: "OpenAI API key",
+        agentSlug: "ceo",
+        projectSlug: null,
+        kind: "secret",
+        requirement: "required",
+        defaultValue: null,
+        portability: "portable",
+      },
+    ];
+    mockTeamCatalogApi.preview.mockResolvedValue(preview);
+
+    await renderPage();
+
+    const installCta = findButton("Install team");
+    await act(async () => {
+      installCta!.click();
+    });
+    await flushReact();
+
+    const footerInstall = Array.from(document.querySelectorAll("button")).filter((b) =>
+      (b.textContent ?? "").includes("Install team"),
+    ).at(-1) as HTMLButtonElement;
+    expect(footerInstall.disabled).toBe(true);
+    expect(document.body.textContent).toContain("Required secrets missing: 1");
+
+    const secretInput = document.querySelector('input[aria-label="OPENAI_API_KEY value"]') as HTMLInputElement;
+    expect(secretInput).toBeTruthy();
+    await act(async () => {
+      setInputValue(secretInput, "sk-imported");
+    });
+    await flushReact();
+
+    expect(footerInstall.disabled).toBe(false);
+    await act(async () => {
+      footerInstall.click();
+    });
+    await flushReact();
+
+    expect(mockTeamCatalogApi.install).toHaveBeenCalledWith(
+      "company-1",
+      "team-no-deps",
+      expect.objectContaining({
+        secretValues: {
+          "agent:ceo:OPENAI_API_KEY": "sk-imported",
+        },
+      }),
+    );
   });
 
   it("requires a target manager before continuing when the team has root agents", async () => {

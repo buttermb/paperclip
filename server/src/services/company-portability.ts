@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { execFile } from "node:child_process";
 import path from "node:path";
@@ -70,6 +70,7 @@ import { issueService } from "./issues.js";
 import { projectService } from "./projects.js";
 import { routineService } from "./routines.js";
 import { secretService } from "./secrets.js";
+import { getConfiguredSecretProvider } from "../secrets/configured-provider.js";
 import {
   PORTABLE_CATALOG_PROVENANCE_STRING_KEYS,
   readCatalogStringList,
@@ -2412,6 +2413,63 @@ function buildEnvInputMap(inputs: CompanyPortabilityEnvInput[]) {
   return env;
 }
 
+function envInputScopedKey(input: CompanyPortabilityEnvInput) {
+  if (input.agentSlug) return `agent:${input.agentSlug}:${input.key}`;
+  if (input.projectSlug) return `project:${input.projectSlug}:${input.key}`;
+  return input.key;
+}
+
+function envInputValue(input: CompanyPortabilityEnvInput, values: Record<string, string> | null | undefined) {
+  if (!values) return null;
+  const scopedKey = envInputScopedKey(input);
+  if (Object.prototype.hasOwnProperty.call(values, scopedKey)) return values[scopedKey];
+  if (Object.prototype.hasOwnProperty.call(values, input.key)) return values[input.key];
+  return null;
+}
+
+function importSecretLabel(input: CompanyPortabilityEnvInput) {
+  const scope = input.agentSlug
+    ? `agent ${input.agentSlug}`
+    : input.projectSlug
+      ? `project ${input.projectSlug}`
+      : "company import";
+  return `${scope} ${input.key}`;
+}
+
+function importSecretKey(input: CompanyPortabilityEnvInput, suffix: string) {
+  const scope = input.agentSlug
+    ? `agent-${input.agentSlug}`
+    : input.projectSlug
+      ? `project-${input.projectSlug}`
+      : "company";
+  return `import-${scope}-${input.key}-${suffix}`;
+}
+
+function writeManifestEnvBinding(
+  manifest: CompanyPortabilityManifest,
+  input: CompanyPortabilityEnvInput,
+  binding: AgentEnvConfig[string],
+) {
+  if (input.agentSlug) {
+    const agent = manifest.agents.find((entry) => entry.slug === input.agentSlug);
+    if (!agent) return;
+    const adapterConfig = isPlainRecord(agent.adapterConfig) ? agent.adapterConfig : {};
+    const env = isPlainRecord(adapterConfig.env) ? { ...adapterConfig.env } : {};
+    env[input.key] = binding;
+    agent.adapterConfig = { ...adapterConfig, env };
+    return;
+  }
+
+  if (input.projectSlug) {
+    const project = manifest.projects.find((entry) => entry.slug === input.projectSlug);
+    if (!project) return;
+    project.env = {
+      ...(project.env ?? {}),
+      [input.key]: binding,
+    };
+  }
+}
+
 function readCompanyApprovalDefault(_frontmatter: Record<string, unknown>) {
   return false;
 }
@@ -2925,6 +2983,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
   const companySkills = companySkillService(db);
   const secrets = secretService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
+  const defaultSecretProvider = getConfiguredSecretProvider();
 
   function assertKnownImportAdapterType(type: string | null | undefined): string {
     const adapterType = typeof type === "string" ? type.trim() : "";
@@ -2981,6 +3040,56 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       adapterType: effectiveAdapterType,
       adapterConfig: normalizedAdapterConfig,
     };
+  }
+
+  async function materializeImportEnvInputValues(
+    companyId: string,
+    manifest: CompanyPortabilityManifest,
+    envInputs: CompanyPortabilityEnvInput[],
+    secretValues: Record<string, string> | null | undefined,
+    actorUserId: string | null | undefined,
+  ) {
+    if (envInputs.length === 0) return;
+    const missingRequired = envInputs.filter((input) => {
+      if (input.requirement !== "required") return false;
+      const value = envInputValue(input, secretValues);
+      return value === null || value.trim().length === 0;
+    });
+    if (missingRequired.length > 0) {
+      throw unprocessable(`Required environment values are missing: ${missingRequired.map(envInputScopedKey).join(", ")}`);
+    }
+
+    for (const input of envInputs) {
+      const value = envInputValue(input, secretValues);
+      if (value === null || value.trim().length === 0) continue;
+
+      if (input.kind === "plain") {
+        writeManifestEnvBinding(manifest, input, {
+          type: "plain",
+          value,
+        });
+        continue;
+      }
+
+      const suffix = randomUUID().slice(0, 8);
+      const label = importSecretLabel(input);
+      const secret = await secrets.create(
+        companyId,
+        {
+          name: `Imported ${label} ${suffix}`,
+          key: importSecretKey(input, suffix),
+          provider: defaultSecretProvider,
+          value,
+          description: input.description ?? `Imported ${input.key} for ${label}.`,
+        },
+        { userId: actorUserId ?? null, agentId: null },
+      );
+      writeManifestEnvBinding(manifest, input, {
+        type: "secret_ref",
+        secretId: secret.id,
+        version: "latest",
+      });
+    }
   }
 
   function resolveImportedAssigneeAgentId(
@@ -4235,6 +4344,33 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
 
     if (!targetCompany) throw notFound("Target company not found");
 
+    const importedAgentEnvSlugs = new Set(
+      plan.preview.plan.agentPlans
+        .filter((entry) => entry.action !== "skip")
+        .map((entry) => entry.slug),
+    );
+    const importedProjectEnvSlugs = new Set(
+      plan.preview.plan.projectPlans
+        .filter((entry) => entry.action !== "skip")
+        .map((entry) => entry.slug),
+    );
+    const importEnvInputs = (sourceManifest.envInputs ?? []).filter((inputValue) => {
+      if (inputValue.agentSlug) {
+        return include.agents && importedAgentEnvSlugs.has(inputValue.agentSlug);
+      }
+      if (inputValue.projectSlug) {
+        return include.projects && importedProjectEnvSlugs.has(inputValue.projectSlug);
+      }
+      return true;
+    });
+    await materializeImportEnvInputValues(
+      targetCompany.id,
+      sourceManifest,
+      importEnvInputs,
+      input.secretValues,
+      actorUserId,
+    );
+
     if (include.company) {
       const logoPath = sourceManifest.company?.logoPath ?? null;
       if (!logoPath) {
@@ -4412,6 +4548,11 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             warnings.push(`Failed to materialize instructions bundle for ${manifestAgent.slug}: ${err instanceof Error ? err.message : String(err)}`);
           }
           agentStatusById.set(updated.id, updated.status ?? agentStatusById.get(updated.id) ?? null);
+          await secrets.syncEnvBindingsForTarget?.(
+            targetCompany.id,
+            { targetType: "agent", targetId: updated.id },
+            isPlainRecord(updated.adapterConfig) ? updated.adapterConfig.env : undefined,
+          );
           importedSlugToAgentId.set(planAgent.slug, updated.id);
           existingSlugToAgentId.set(normalizeAgentUrlKey(updated.name) ?? updated.id, updated.id);
           resultAgents.push({
@@ -4448,6 +4589,11 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           warnings.push(`Failed to materialize instructions bundle for ${manifestAgent.slug}: ${err instanceof Error ? err.message : String(err)}`);
         }
         agentStatusById.set(created.id, created.status ?? createdStatus);
+        await secrets.syncEnvBindingsForTarget?.(
+          targetCompany.id,
+          { targetType: "agent", targetId: created.id },
+          isPlainRecord(created.adapterConfig) ? created.adapterConfig.env : undefined,
+        );
         importedSlugToAgentId.set(planAgent.slug, created.id);
         existingSlugToAgentId.set(normalizeAgentUrlKey(created.name) ?? created.id, created.id);
         resultAgents.push({

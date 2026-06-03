@@ -112,6 +112,22 @@ describe("teamsCatalogService", () => {
     );
   });
 
+  it("passes install secretValues through to company portability import", async () => {
+    const svc = teamsCatalogService({} as any);
+
+    await svc.installCatalogTeam("company-1", "core-exec-team", {
+      secretValues: { "agent:ceo:OPENAI_API_KEY": "sk-imported" },
+    });
+
+    expect(mockCompanyPortabilityService.importBundle).toHaveBeenCalledWith(
+      expect.objectContaining({
+        secretValues: { "agent:ceo:OPENAI_API_KEY": "sk-imported" },
+      }),
+      null,
+      { mode: "agent_safe", sourceCompanyId: "company-1" },
+    );
+  });
+
   it("classifies unresolved and unsafe external skill requirements as blocked", () => {
     const fakeTeam: CatalogTeam = {
       id: "paperclipai:optional:test:unsafe",

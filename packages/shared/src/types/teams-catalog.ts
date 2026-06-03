@@ -144,6 +144,7 @@ export interface CatalogTeamImportOptions {
 
 export interface CatalogTeamInstallOptions extends CatalogTeamImportOptions {
   adapterOverrides?: Record<string, CompanyPortabilityAdapterOverride>;
+  secretValues?: Record<string, string>;
 }
 
 export type CatalogTeamSkillPreparationAction =

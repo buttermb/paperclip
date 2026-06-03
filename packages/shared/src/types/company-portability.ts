@@ -294,6 +294,7 @@ export interface CompanyPortabilityAdapterOverride {
 
 export interface CompanyPortabilityImportRequest extends CompanyPortabilityPreviewRequest {
   adapterOverrides?: Record<string, CompanyPortabilityAdapterOverride>;
+  secretValues?: Record<string, string>;
 }
 
 export interface CompanyPortabilityImportResult {

@@ -63,6 +63,7 @@ const assetSvc = {
 };
 
 const secretSvc = {
+  create: vi.fn(async () => ({ id: "secret-created" })),
   normalizeAdapterConfigForPersistence: vi.fn(async (_companyId: string, config: Record<string, unknown>) => config),
   normalizeEnvBindingsForPersistence: vi.fn(async (_companyId: string, env: Record<string, unknown>) => env),
   syncEnvBindingsForTarget: vi.fn(async () => []),
@@ -131,6 +132,7 @@ describe("company portability", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    secretSvc.create.mockResolvedValue({ id: "secret-created" });
     secretSvc.normalizeAdapterConfigForPersistence.mockImplementation(async (_companyId, config) => config);
     secretSvc.normalizeEnvBindingsForPersistence.mockImplementation(async (_companyId, env) => env);
     secretSvc.syncEnvBindingsForTarget.mockResolvedValue([]);
@@ -1390,6 +1392,113 @@ describe("company portability", () => {
         portability: "portable",
       },
     ]);
+  });
+
+  it("materializes required agent env inputs from import secretValues as company secrets", async () => {
+    const portability = companyPortabilityService({} as any);
+    agentSvc.list.mockResolvedValue([]);
+    agentSvc.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
+      id: "agent-imported",
+      name: input.name,
+      adapterType: input.adapterType,
+      adapterConfig: input.adapterConfig,
+      status: input.status,
+    }));
+
+    await portability.importBundle({
+      source: {
+        type: "inline",
+        files: {
+          "COMPANY.md": [
+            "---",
+            "name: Import",
+            "includes:",
+            "  - agents/coder/AGENTS.md",
+            "---",
+            "",
+          ].join("\n"),
+          "agents/coder/AGENTS.md": [
+            "---",
+            "name: Coder",
+            "slug: coder",
+            "kind: agent",
+            "---",
+            "",
+            "# Coder",
+            "",
+          ].join("\n"),
+          ".paperclip.yaml": [
+            "schema: paperclip/v1",
+            "agents:",
+            "  coder:",
+            "    adapter:",
+            "      type: codex_local",
+            "      config: {}",
+            "    inputs:",
+            "      env:",
+            "        OPENAI_API_KEY:",
+            "          kind: secret",
+            "          requirement: required",
+            "",
+          ].join("\n"),
+        },
+      },
+      include: {
+        company: false,
+        agents: true,
+        projects: false,
+        issues: false,
+      },
+      target: {
+        mode: "existing_company",
+        companyId: "company-1",
+      },
+      collisionStrategy: "rename",
+      secretValues: {
+        "agent:coder:OPENAI_API_KEY": "sk-imported",
+      },
+    }, "user-1");
+
+    expect(secretSvc.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({
+        provider: "local_encrypted",
+        value: "sk-imported",
+        description: expect.stringContaining("OPENAI_API_KEY"),
+      }),
+      { userId: "user-1", agentId: null },
+    );
+    expect(secretSvc.normalizeAdapterConfigForPersistence).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({
+        env: {
+          OPENAI_API_KEY: {
+            type: "secret_ref",
+            secretId: "secret-created",
+            version: "latest",
+          },
+        },
+      }),
+      { strictMode: false },
+    );
+    expect(agentSvc.create).toHaveBeenCalledWith("company-1", expect.objectContaining({
+      adapterConfig: expect.objectContaining({
+        env: {
+          OPENAI_API_KEY: {
+            type: "secret_ref",
+            secretId: "secret-created",
+            version: "latest",
+          },
+        },
+      }),
+    }));
+    expect(secretSvc.syncEnvBindingsForTarget).toHaveBeenCalledWith(
+      "company-1",
+      { targetType: "agent", targetId: "agent-imported" },
+      expect.objectContaining({
+        OPENAI_API_KEY: expect.objectContaining({ secretId: "secret-created" }),
+      }),
+    );
   });
 
   it("exports project env as portable inputs without concrete values", async () => {
