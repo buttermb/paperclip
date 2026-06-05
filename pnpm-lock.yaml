@@ -624,6 +624,8 @@ importers:
 
   packages/skills-catalog: {}
 
+  packages/teams-catalog: {}
+
   server:
     dependencies:
       '@aws-sdk/client-s3':
