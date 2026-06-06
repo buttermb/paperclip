@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { createIssueThreadInteractionSchema } from "./validators/issue.js";
+import {
+  acceptIssueThreadInteractionSchema,
+  createIssueThreadInteractionSchema,
+} from "./validators/issue.js";
 
 describe("issue thread interaction schemas", () => {
   it("parses request_confirmation payloads with default no-wake continuation", () => {
@@ -119,5 +122,93 @@ describe("issue thread interaction schemas", () => {
         },
       })).toThrow("href must not use javascript:, data:, or protocol-relative URLs");
     }
+  });
+
+  it("parses request_checkbox_confirmation payloads with checkbox defaults", () => {
+    const parsed = createIssueThreadInteractionSchema.parse({
+      kind: "request_checkbox_confirmation",
+      payload: {
+        version: 1,
+        prompt: "Which items should be archived?",
+        options: [
+          { id: "item-1", label: "Draft report" },
+          { id: "item-2", label: "Old screenshot", description: "Captured during QA." },
+        ],
+        defaultSelectedOptionIds: ["item-2"],
+        minSelected: 0,
+        maxSelected: 2,
+        acceptLabel: "Archive selected",
+        rejectRequiresReason: true,
+        target: {
+          type: "issue_document",
+          key: "plan",
+          revisionId: "33333333-3333-4333-8333-333333333333",
+          revisionNumber: 2,
+        },
+      },
+    });
+
+    expect(parsed).toMatchObject({
+      kind: "request_checkbox_confirmation",
+      continuationPolicy: "wake_assignee",
+      payload: {
+        allowDeclineReason: true,
+        defaultSelectedOptionIds: ["item-2"],
+        minSelected: 0,
+        maxSelected: 2,
+      },
+    });
+  });
+
+  it("rejects invalid request_checkbox_confirmation option references and bounds", () => {
+    const base = {
+      kind: "request_checkbox_confirmation",
+      payload: {
+        version: 1,
+        prompt: "Which items should be archived?",
+        options: [
+          { id: "item-1", label: "Draft report" },
+          { id: "item-2", label: "Old screenshot" },
+        ],
+      },
+    } as const;
+
+    expect(() => createIssueThreadInteractionSchema.parse({
+      ...base,
+      payload: {
+        ...base.payload,
+        options: [
+          { id: "item-1", label: "Draft report" },
+          { id: "item-1", label: "Duplicate" },
+        ],
+      },
+    })).toThrow("Option ids must be unique within one checkbox confirmation");
+
+    expect(() => createIssueThreadInteractionSchema.parse({
+      ...base,
+      payload: {
+        ...base.payload,
+        defaultSelectedOptionIds: ["missing"],
+      },
+    })).toThrow("defaultSelectedOptionIds must reference existing option ids");
+
+    expect(() => createIssueThreadInteractionSchema.parse({
+      ...base,
+      payload: {
+        ...base.payload,
+        minSelected: 2,
+        maxSelected: 1,
+      },
+    })).toThrow("maxSelected must be greater than or equal to minSelected");
+  });
+
+  it("accepts empty checkbox selections and rejects duplicate selected option ids", () => {
+    expect(acceptIssueThreadInteractionSchema.parse({ selectedOptionIds: [] })).toEqual({
+      selectedOptionIds: [],
+    });
+
+    expect(() => acceptIssueThreadInteractionSchema.parse({
+      selectedOptionIds: ["item-1", "item-1"],
+    })).toThrow("selectedOptionIds must be unique");
   });
 });
