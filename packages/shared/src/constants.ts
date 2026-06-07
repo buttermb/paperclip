@@ -371,6 +371,28 @@ export type DocumentStatus = (typeof DOCUMENT_STATUSES)[number];
 export const DOCUMENT_TYPES = ["plan", "spec", "brief", "report", "other"] as const;
 export type DocumentType = (typeof DOCUMENT_TYPES)[number];
 
+/**
+ * Categorical {@link DocumentType} values an issue-document key can map onto.
+ * Excludes the catch-all `other`, which is the fallback for any unmatched key.
+ */
+const ISSUE_DOCUMENT_KEY_TYPE_MAP: Record<string, DocumentType> = {
+  plan: "plan",
+  spec: "spec",
+  brief: "brief",
+  report: "report",
+};
+
+/**
+ * Derive the categorical {@link DocumentType} for an auto-generated issue
+ * document from its key (e.g. `plan` → `plan`). Locked-document fallback keys
+ * carry a numeric suffix (`plan-2`), so that is stripped before matching.
+ * Anything that doesn't match a known category falls back to `other`.
+ */
+export function documentTypeForIssueDocumentKey(key: string): DocumentType {
+  const base = key.trim().toLowerCase().replace(/-[0-9]+$/, "");
+  return ISSUE_DOCUMENT_KEY_TYPE_MAP[base] ?? "other";
+}
+
 export const DOCUMENT_LINK_TARGET_TYPES = [
   "issue",
   "project",

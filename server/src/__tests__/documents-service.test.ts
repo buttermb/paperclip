@@ -196,6 +196,41 @@ describeEmbeddedPostgres("documentService system issue documents", () => {
     }));
   });
 
+  it("derives documentType from the issue document key so the Type filter matches", async () => {
+    const { issueId } = await createIssueWithDocuments();
+
+    const plan = await svc.getIssueDocumentByKey(issueId, "plan");
+    const summary = await svc.getIssueDocumentByKey(issueId, ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY);
+    expect(plan?.documentType).toBe("plan");
+    // Unknown / system keys stay categorical "other".
+    expect(summary?.documentType).toBe("other");
+
+    // Locked-document fallback keys (plan-2) inherit the same type.
+    const locked = await svc.lockIssueDocument({ issueId, key: "plan", lockedByUserId: "board-user" });
+    const fallback = await svc.upsertIssueDocument({
+      issueId,
+      key: "plan",
+      title: "Plan",
+      format: "markdown",
+      body: "# Replacement plan",
+      baseRevisionId: locked.document.latestRevisionId,
+      lockedDocumentStrategy: "create_new_document",
+    });
+    expect(fallback.document.key).toBe("plan-2");
+    expect(fallback.document.documentType).toBe("plan");
+
+    // The company library Type filter (documentType) now matches plan docs.
+    const planDocs = await svc.listCompanyDocuments(plan!.companyId, {
+      type: ["plan"],
+      limit: 50,
+      offset: 0,
+    });
+    const planIds = planDocs.map((doc) => doc.id);
+    expect(planIds).toContain(plan!.id);
+    expect(planIds).toContain(fallback.document.id);
+    expect(planIds).not.toContain(summary!.id);
+  });
+
   it("maintains document links for issue-document compatibility and company library queries", async () => {
     const { issueId } = await createIssueWithDocuments();
 

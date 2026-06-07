@@ -715,6 +715,13 @@
       "when": 1780794600000,
       "tag": "0101_document_suggestion_resolved_status",
       "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1780794900000,
+      "tag": "0102_backfill_document_type_from_issue_key",
+      "breakpoints": true
     }
   ]
 }

@@ -23,6 +23,7 @@ import {
   type DocumentLinkTargetType,
   type DocumentStatus,
   type DocumentType,
+  documentTypeForIssueDocumentKey,
   isSystemIssueDocumentKey,
   issueDocumentKeySchema,
 } from "@paperclipai/shared";
@@ -863,6 +864,7 @@ export function documentService(db: Db) {
                     companyId: issue.companyId,
                     title: input.title ?? null,
                     format: input.format,
+                    documentType: documentTypeForIssueDocumentKey(fallbackKey),
                     latestBody: input.body,
                     latestRevisionId: null,
                     latestRevisionNumber: 1,
@@ -1047,6 +1049,7 @@ export function documentService(db: Db) {
               companyId: issue.companyId,
               title: input.title ?? null,
               format: input.format,
+              documentType: documentTypeForIssueDocumentKey(key),
               latestBody: input.body,
               latestRevisionId: null,
               latestRevisionNumber: 1,
