@@ -246,7 +246,8 @@ describe("DocumentReviewRail", () => {
     expect(container.textContent).toContain("Orphaned feedback (1)");
   });
 
-  it("disables Done reviewing for read-only viewers", async () => {
+  it("keeps Done reviewing keyboard-focusable but inert for read-only viewers", async () => {
+    const onDoneReviewing = vi.fn();
     await act(() =>
       root.render(
         <DocumentReviewRail
@@ -254,11 +255,39 @@ describe("DocumentReviewRail", () => {
           canReview={false}
           canFinishReview={false}
           latestRevisionId="rev-1"
+          doneReviewingDisabledReason="You don't have edit access"
+          onDoneReviewing={onDoneReviewing}
           {...baseHandlers}
         />,
       ),
     );
     const done = container.querySelector<HTMLButtonElement>('[data-testid="rail-done-reviewing"]');
-    expect(done?.disabled).toBe(true);
+    // aria-disabled (not the `disabled` attribute) so it stays in the tab order and can
+    // surface the tooltip explaining *why* it's disabled to keyboard / screen-reader users.
+    expect(done?.getAttribute("aria-disabled")).toBe("true");
+    expect(done?.hasAttribute("disabled")).toBe(false);
+    // ...but clicking it must not fire the handoff.
+    await act(() => done!.click());
+    expect(onDoneReviewing).not.toHaveBeenCalled();
+  });
+
+  it("fires the Done reviewing handler when the viewer can finish review", async () => {
+    const onDoneReviewing = vi.fn();
+    await act(() =>
+      root.render(
+        <DocumentReviewRail
+          reviewIndex={makeIndex()}
+          canReview
+          canFinishReview
+          latestRevisionId="rev-1"
+          onDoneReviewing={onDoneReviewing}
+          {...baseHandlers}
+        />,
+      ),
+    );
+    const done = container.querySelector<HTMLButtonElement>('[data-testid="rail-done-reviewing"]');
+    expect(done?.getAttribute("aria-disabled")).toBeNull();
+    await act(() => done!.click());
+    expect(onDoneReviewing).toHaveBeenCalledTimes(1);
   });
 });

@@ -388,19 +388,29 @@ function ReviewRailBody({
         <div className="border-t border-border p-2">
           <Tooltip>
             <TooltipTrigger asChild>
-              <span className="block">
-                <Button
-                  type="button"
-                  className="w-full"
-                  size="sm"
-                  disabled={!canFinishReview}
-                  onClick={onDoneReviewing}
-                  data-testid="rail-done-reviewing"
-                >
-                  <CheckCircle2 className="mr-1.5 h-4 w-4" aria-hidden="true" />
-                  Done reviewing
-                </Button>
-              </span>
+              {/*
+                Use aria-disabled (not the `disabled` attribute) so the button stays
+                in the tab order and remains the tooltip trigger: keyboard and screen-reader
+                users can focus it to learn *why* it's disabled, instead of hitting a dead
+                control. onClick is guarded so the action can't fire while disabled.
+              */}
+              <Button
+                type="button"
+                className="w-full aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
+                size="sm"
+                aria-disabled={!canFinishReview || undefined}
+                onClick={(event) => {
+                  if (!canFinishReview) {
+                    event.preventDefault();
+                    return;
+                  }
+                  onDoneReviewing?.();
+                }}
+                data-testid="rail-done-reviewing"
+              >
+                <CheckCircle2 className="mr-1.5 h-4 w-4" aria-hidden="true" />
+                Done reviewing
+              </Button>
             </TooltipTrigger>
             {!canFinishReview ? (
               <TooltipContent>

@@ -93,7 +93,7 @@ export function DoneReviewingDialog({
         <DialogHeader>
           <DialogTitle>Done reviewing</DialogTitle>
           <DialogDescription>
-            Hand the document back to its owner with an optional note and a real wake.
+            Hand the document back to its owner with an optional note. We'll notify them so they pick the review back up.
           </DialogDescription>
         </DialogHeader>
 
@@ -171,6 +171,7 @@ export function DoneReviewingDialog({
             variant="ghost"
             onClick={() => onOpenChange(false)}
             disabled={submitting}
+            title="Close this dialog without notifying the owner"
             data-testid="done-reviewing-just-close"
           >
             Just close
