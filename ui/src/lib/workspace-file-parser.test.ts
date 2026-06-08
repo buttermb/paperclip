@@ -80,6 +80,10 @@ describe("parseWorkspaceFileRef", () => {
     });
   });
 
+  it("rejects one-segment directory refs because they are too ambiguous to route", () => {
+    expect(parseWorkspaceFileRef("sources/")).toBeNull();
+  });
+
   it("rejects unsafe directory refs", () => {
     expect(parseWorkspaceFileRef("../secrets/")).toBeNull();
     expect(parseWorkspaceFileRef("foo/../secrets/")).toBeNull();

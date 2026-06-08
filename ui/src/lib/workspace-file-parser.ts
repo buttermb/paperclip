@@ -66,6 +66,7 @@ export function parseWorkspaceFileRef(input: string): ParsedWorkspaceFileRef | n
   if (directoryMatch) {
     const [, rawPath] = directoryMatch;
     if (!rawPath || !looksLikeWorkspacePath(rawPath, { allowTrailingSlash: true })) return null;
+    if (!rawPath.slice(0, -1).includes("/")) return null;
     return {
       path: rawPath,
       resourceKind: "directory",

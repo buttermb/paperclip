@@ -243,6 +243,35 @@ describeEmbeddedPostgres("workspace file resources", () => {
     expect(resolved.capabilities.preview).toBe(true);
   });
 
+  it("auto-discovers unhinted same-company project files when issue workspaces miss", async () => {
+    const { projectRoot, targetProjectRoot, executionRoot } = await makeWorkspace();
+    const graph = await seedGraph(db, { projectRoot, targetProjectRoot, executionRoot });
+    const targetPath = "docs/reference/skills.md";
+    await fs.mkdir(path.join(targetProjectRoot, path.dirname(targetPath)), { recursive: true });
+    await fs.writeFile(path.join(targetProjectRoot, targetPath), "# Skills reference\n", "utf8");
+
+    const resolved = await workspaceFileResourceService(db).resolve(graph.issueId, {
+      path: targetPath,
+      workspace: "auto",
+    });
+
+    expect(resolved).toMatchObject({
+      workspaceKind: "project_workspace",
+      workspaceId: graph.targetProjectWorkspaceId,
+      projectId: graph.targetProjectId,
+      projectName: "Target project",
+      displayPath: `Target project / ${targetPath}`,
+      previewKind: "text",
+    });
+
+    const content = await workspaceFileResourceService(db).readContent(graph.issueId, {
+      path: targetPath,
+      workspace: "auto",
+    });
+    expect(content.resource.workspaceId).toBe(graph.targetProjectWorkspaceId);
+    expect(content.content.data).toContain("# Skills reference");
+  });
+
   it("resolves explicit same-company cross-project workspace files and logs target details", async () => {
     const { root, projectRoot, targetProjectRoot, executionRoot } = await makeWorkspace();
     const graph = await seedGraph(db, { projectRoot, targetProjectRoot, executionRoot });
@@ -384,6 +413,87 @@ describeEmbeddedPostgres("workspace file resources", () => {
     ]));
     expect(JSON.stringify(listed.body)).not.toContain(root);
     expect(JSON.stringify(listed.body)).not.toContain("outside.txt");
+  });
+
+  it("auto-discovers unhinted same-company project folders when issue workspaces miss", async () => {
+    const { root, projectRoot, targetProjectRoot, executionRoot } = await makeWorkspace();
+    const graph = await seedGraph(db, { projectRoot, targetProjectRoot, executionRoot });
+    const folderPath = "content-os/cases/active/2026-06-06-pap-10199-bundled-skills/";
+    await fs.mkdir(path.join(targetProjectRoot, folderPath), { recursive: true });
+    await fs.writeFile(path.join(targetProjectRoot, folderPath, "README.md"), "# Bundled skills\n", "utf8");
+    await fs.writeFile(path.join(targetProjectRoot, folderPath, "suggestions.md"), "# Suggestions\n", "utf8");
+
+    const app = createApp(db, {
+      type: "board",
+      userId: "board-user",
+      companyIds: [graph.companyId],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    const resolved = await request(app)
+      .get(`/api/issues/${graph.issueId}/file-resources/resolve`)
+      .query({ path: folderPath });
+    expect(resolved.status).toBe(200);
+    expect(resolved.body).toMatchObject({
+      kind: "directory",
+      workspaceId: graph.targetProjectWorkspaceId,
+      projectId: graph.targetProjectId,
+      projectName: "Target project",
+      displayPath: `Target project / ${folderPath}`,
+    });
+
+    const listed = await request(app)
+      .get(`/api/issues/${graph.issueId}/file-resources/list`)
+      .query({ path: folderPath });
+    expect(listed.status).toBe(200);
+    expect(listed.body.state).toBe("available");
+    expect(listed.body.workspace).toMatchObject({
+      workspaceId: graph.targetProjectWorkspaceId,
+      projectId: graph.targetProjectId,
+      projectName: "Target project",
+    });
+    expect(new Set(listed.body.items.map((item: { relativePath: string }) => item.relativePath))).toEqual(new Set([
+      `${folderPath}README.md`,
+      `${folderPath}suggestions.md`,
+    ]));
+    expect(JSON.stringify(listed.body)).not.toContain(root);
+  });
+
+  it("rejects ambiguous unhinted same-company project file matches", async () => {
+    const { projectRoot, targetProjectRoot, executionRoot } = await makeWorkspace();
+    const graph = await seedGraph(db, { projectRoot, targetProjectRoot, executionRoot });
+    const duplicateProjectId = crypto.randomUUID();
+    const duplicateWorkspaceId = crypto.randomUUID();
+    const duplicateRoot = path.join(path.dirname(targetProjectRoot), "duplicate-target");
+    const targetPath = "docs/reference/skills.md";
+    await fs.mkdir(path.join(targetProjectRoot, path.dirname(targetPath)), { recursive: true });
+    await fs.writeFile(path.join(targetProjectRoot, targetPath), "# Target\n", "utf8");
+    await fs.mkdir(path.join(duplicateRoot, path.dirname(targetPath)), { recursive: true });
+    await fs.writeFile(path.join(duplicateRoot, targetPath), "# Duplicate\n", "utf8");
+    await db.insert(projects).values({
+      id: duplicateProjectId,
+      companyId: graph.companyId,
+      name: "Duplicate target",
+      status: "in_progress",
+    });
+    await db.insert(projectWorkspaces).values({
+      id: duplicateWorkspaceId,
+      companyId: graph.companyId,
+      projectId: duplicateProjectId,
+      name: "Duplicate workspace",
+      sourceType: "local_path",
+      cwd: duplicateRoot,
+      isPrimary: true,
+    });
+
+    await expect(workspaceFileResourceService(db).resolve(graph.issueId, {
+      path: targetPath,
+      workspace: "auto",
+    })).rejects.toMatchObject({
+      status: 409,
+      details: { code: "ambiguous_workspace_path" },
+    });
   });
 
   it("denies explicit cross-company project workspaces", async () => {

@@ -126,6 +126,11 @@ type LocalResolvedDirectory = {
   rootReal: string;
 };
 
+type AutoDiscovered<T> =
+  | { state: "none" }
+  | { state: "one"; value: T }
+  | { state: "ambiguous"; count: number };
+
 type WorkspaceFileListQueryInput = {
   workspace?: WorkspaceFileSelector | null;
   projectId?: string | null;
@@ -338,6 +343,14 @@ function candidateFromProjectWorkspace(
     rootPath,
     remote,
   };
+}
+
+function isHttpStatus(error: unknown, status: number) {
+  return (
+    error instanceof Error &&
+    "status" in error &&
+    (error as { status?: number }).status === status
+  );
 }
 
 function directoryResource(input: {
@@ -834,6 +847,63 @@ export function workspaceFileResourceService(db: Db) {
     return candidates;
   }
 
+  async function sameCompanyProjectWorkspaceCandidates(
+    issue: IssueRow,
+    excludedWorkspaceIds: Set<string>,
+  ): Promise<WorkspaceCandidate[]> {
+    const rows = await db.select({
+      workspace: projectWorkspaces,
+      project: {
+        id: projects.id,
+        name: projects.name,
+      },
+    })
+      .from(projectWorkspaces)
+      .innerJoin(projects, eq(projectWorkspaces.projectId, projects.id))
+      .where(and(
+        eq(projectWorkspaces.companyId, issue.companyId),
+        eq(projects.companyId, issue.companyId),
+      ))
+      .orderBy(desc(projectWorkspaces.isPrimary), desc(projectWorkspaces.updatedAt));
+
+    const candidates: WorkspaceCandidate[] = [];
+    const seen = new Set(excludedWorkspaceIds);
+    for (const row of rows) {
+      if (seen.has(row.workspace.id)) continue;
+      seen.add(row.workspace.id);
+      candidates.push(candidateFromProjectWorkspace(row.workspace, row.project));
+    }
+    return candidates;
+  }
+
+  async function discoverUniqueProjectWorkspaceMatch<T>(
+    issue: IssueRow,
+    excludedWorkspaceIds: Set<string>,
+    check: (candidate: WorkspaceCandidate) => Promise<T>,
+  ): Promise<AutoDiscovered<T>> {
+    const candidates = await sameCompanyProjectWorkspaceCandidates(issue, excludedWorkspaceIds);
+    const matches: T[] = [];
+    for (const candidate of candidates) {
+      if (candidate.remote) continue;
+      try {
+        matches.push(await check(candidate));
+      } catch (error) {
+        if (isHttpStatus(error, 404)) continue;
+        throw error;
+      }
+      if (matches.length > 1) return { state: "ambiguous", count: matches.length };
+    }
+    if (matches.length === 1) return { state: "one", value: matches[0]! };
+    return { state: "none" };
+  }
+
+  function throwAmbiguousWorkspacePath(count: number): never {
+    throw new HttpError(409, "Workspace path matched multiple project workspaces", {
+      code: "ambiguous_workspace_path",
+      matchCount: count,
+    });
+  }
+
   async function resolve(issueId: string, input: {
     path: string;
     workspace?: WorkspaceFileSelector | null;
@@ -861,18 +931,24 @@ export function workspaceFileResourceService(db: Db) {
           ? (await statLocalDirectory(candidate, normalized)).resource
           : (await statLocalCandidate(candidate, normalized)).resource;
       } catch (error) {
-        if (
-          !explicitTarget &&
-          error instanceof Error &&
-          "status" in error &&
-          (error as { status?: number }).status === 404 &&
-          selector === "auto"
-        ) {
+        if (!explicitTarget && selector === "auto" && isHttpStatus(error, 404)) {
           lastNotFound = error;
           continue;
         }
         throw error;
       }
+    }
+
+    if (lastNotFound && !explicitTarget && selector === "auto") {
+      const discovered = await discoverUniqueProjectWorkspaceMatch(
+        issue,
+        new Set(candidates.map((candidate) => candidate.workspaceId)),
+        async (candidate) => isDirectoryRequest
+          ? (await statLocalDirectory(candidate, normalized)).resource
+          : (await statLocalCandidate(candidate, normalized)).resource,
+      );
+      if (discovered.state === "one") return discovered.value;
+      if (discovered.state === "ambiguous") throwAmbiguousWorkspacePath(discovered.count);
     }
 
     if (lastNotFound) throw lastNotFound;
@@ -901,6 +977,7 @@ export function workspaceFileResourceService(db: Db) {
     }
 
     let firstUnavailable: { candidate: WorkspaceCandidate; reason: string } | null = null;
+    let lastNotFound: unknown = null;
     for (const candidate of candidates) {
       if (candidate.remote) {
         firstUnavailable ??= { candidate, reason: "remote_workspace" };
@@ -922,7 +999,13 @@ export function workspaceFileResourceService(db: Db) {
           startRelativePath = normalizedPath.relativePath;
         }
       } catch (error) {
-        if (normalizedPath) throw error;
+        if (normalizedPath) {
+          if (!explicitTarget && selector === "auto" && isHttpStatus(error, 404)) {
+            lastNotFound = error;
+            continue;
+          }
+          throw error;
+        }
         firstUnavailable ??= { candidate, reason: "workspace_unavailable" };
         if (explicitTarget || selector !== "auto") {
           return unavailableFileList({ selector, mode, path: null, q, limit, candidate, reason: "workspace_unavailable" });
@@ -975,6 +1058,45 @@ export function workspaceFileResourceService(db: Db) {
       });
     }
 
+    if (lastNotFound && normalizedPath && !explicitTarget && selector === "auto") {
+      const discovered = await discoverUniqueProjectWorkspaceMatch(
+        issue,
+        new Set(candidates.map((candidate) => candidate.workspaceId)),
+        async (candidate) => {
+          const resolvedDirectory = await statLocalDirectory(candidate, normalizedPath);
+          return {
+            candidate,
+            rootReal: resolvedDirectory.rootReal,
+            startReal: resolvedDirectory.realPath,
+            startRelativePath: normalizedPath.relativePath,
+          };
+        },
+      );
+      if (discovered.state === "ambiguous") throwAmbiguousWorkspacePath(discovered.count);
+      if (discovered.state === "one") {
+        const listed = await enumerateWorkspaceFiles({
+          candidate: discovered.value.candidate,
+          rootReal: discovered.value.rootReal,
+          startReal: discovered.value.startReal,
+          startRelativePath: discovered.value.startRelativePath,
+          mode,
+          normalizedQuery,
+          limit,
+        });
+        return availableFileList({
+          selector,
+          mode,
+          path: normalizedPath.relativePath,
+          q,
+          limit,
+          candidate: discovered.value.candidate,
+          items: listed.items,
+          scannedCount: listed.scannedCount,
+          truncated: listed.truncated,
+        });
+      }
+    }
+
     return unavailableFileList({
       selector,
       mode,
@@ -1013,13 +1135,7 @@ export function workspaceFileResourceService(db: Db) {
       try {
         resolved = await statLocalCandidate(candidate, normalized);
       } catch (error) {
-        if (
-          !explicitTarget &&
-          error instanceof Error &&
-          "status" in error &&
-          (error as { status?: number }).status === 404 &&
-          selector === "auto"
-        ) {
+        if (!explicitTarget && selector === "auto" && isHttpStatus(error, 404)) {
           lastNotFound = error;
           continue;
         }
@@ -1042,6 +1158,34 @@ export function workspaceFileResourceService(db: Db) {
           data: resolved.resource.previewKind === "text" ? data.toString("utf8") : data.toString("base64"),
         },
       };
+    }
+
+    if (lastNotFound && !explicitTarget && selector === "auto") {
+      const discovered = await discoverUniqueProjectWorkspaceMatch(
+        issue,
+        new Set(candidates.map((candidate) => candidate.workspaceId)),
+        async (candidate) => statLocalCandidate(candidate, normalized),
+      );
+      if (discovered.state === "ambiguous") throwAmbiguousWorkspacePath(discovered.count);
+      if (discovered.state === "one") {
+        const resolved = discovered.value;
+        if (!resolved.resource.capabilities.preview) {
+          throw unprocessable("Workspace file cannot be previewed", { code: resolved.resource.denialReason ?? "unsupported_content" });
+        }
+        const cap = previewCapForKind(resolved.resource.previewKind);
+        const data = await readStableFile(resolved.realPath, cap);
+        if (resolved.resource.previewKind === "text" && !looksLikeText(data.subarray(0, Math.min(data.length, TEXT_SNIFF_BYTES)))) {
+          throw unprocessable("Workspace file is not a text file", { code: "binary_content" });
+        }
+
+        return {
+          resource: resolved.resource,
+          content: {
+            encoding: resolved.resource.previewKind === "text" ? "utf8" : "base64",
+            data: resolved.resource.previewKind === "text" ? data.toString("utf8") : data.toString("base64"),
+          },
+        };
+      }
     }
 
     if (lastNotFound) throw lastNotFound;
