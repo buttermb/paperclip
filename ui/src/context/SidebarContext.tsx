@@ -167,6 +167,7 @@ export function SidebarProvider({ children }: { children: ReactNode }) {
     }),
     [
       sidebarOpen,
+      setSidebarOpen,
       toggleSidebar,
       isMobile,
       collapsed,
