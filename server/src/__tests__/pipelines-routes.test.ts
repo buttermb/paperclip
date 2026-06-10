@@ -543,6 +543,30 @@ describeEmbeddedPostgres("pipeline routes", () => {
     const pipeline = await http.post(`/api/companies/${company.id}/pipelines`).send({ key: "valid-review", name: "Valid review" }).expect(201);
     const intake = pipeline.body.stages.find((stage: { key: string }) => stage.key === "intake");
     await http.patch(`/api/pipelines/${pipeline.body.id}/stages/${intake.id}`).send({ kind: "review" }).expect(422);
+
+    await http
+      .post(`/api/companies/${company.id}/pipelines`)
+      .send({
+        key: "bad-request-changes-target",
+        name: "Bad request changes target",
+        stages: [
+          { key: "intake", name: "Intake", kind: "open", position: 100 },
+          {
+            key: "review",
+            name: "Review",
+            kind: "review",
+            position: 200,
+            config: {
+              approveToStageKey: "done",
+              rejectToStageKey: "cancelled",
+              requestChangesToStageKey: "missing",
+            },
+          },
+          { key: "done", name: "Done", kind: "done", position: 900 },
+          { key: "cancelled", name: "Cancelled", kind: "cancelled", position: 1000 },
+        ],
+      })
+      .expect(422);
   });
 
   it("applies review decisions atomically with edits and stores reject reasons verbatim", async () => {
@@ -590,6 +614,71 @@ describeEmbeddedPostgres("pipeline routes", () => {
     expect(reviewEvent.payload.reason).toBe(reason);
   });
 
+  it("routes request-changes review decisions to the configured stage", async () => {
+    const company = await seedCompany();
+    const http = request(app(boardActor));
+    const pipeline = await http
+      .post(`/api/companies/${company.id}/pipelines`)
+      .send({
+        key: "review-request-changes",
+        name: "Review request changes",
+        stages: [
+          { key: "drafting", name: "Drafting", kind: "working", position: 100 },
+          {
+            key: "review",
+            name: "Review",
+            kind: "review",
+            position: 200,
+            config: {
+              approveToStageKey: "done",
+              rejectToStageKey: "cancelled",
+              requestChangesToStageKey: "drafting",
+            },
+          },
+          { key: "done", name: "Done", kind: "done", position: 900 },
+          { key: "cancelled", name: "Cancelled", kind: "cancelled", position: 1000 },
+        ],
+      })
+      .expect(201);
+
+    const created = await http
+      .post(`/api/pipelines/${pipeline.body.id}/cases`)
+      .send({ caseKey: "needs-edits", title: "Needs edits" })
+      .expect(201);
+    await http.post(`/api/cases/${created.body.case.id}/transition`).send({ toStageKey: "review", expectedVersion: 1 }).expect(200);
+    await http
+      .post(`/api/cases/${created.body.case.id}/review`)
+      .send({ decision: "request_changes", expectedVersion: 2 })
+      .expect(422);
+
+    const changed = await http
+      .post(`/api/cases/${created.body.case.id}/review`)
+      .send({ decision: "request_changes", reason: "Tighten the framing", expectedVersion: 2 })
+      .expect(200);
+    expect(changed.body.case.version).toBe(3);
+    const detail = await http.get(`/api/cases/${created.body.case.id}`).expect(200);
+    expect(detail.body.stage.key).toBe("drafting");
+    const events = await http.get(`/api/cases/${created.body.case.id}/events`).expect(200);
+    const reviewEvent = events.body.items.find((event: { type: string }) => event.type === "review_decided");
+    expect(reviewEvent.payload.decision).toBe("request_changes");
+    expect(reviewEvent.payload.reason).toBe("Tighten the framing");
+
+    const defaultPipeline = await http
+      .post(`/api/companies/${company.id}/pipelines`)
+      .send({ key: "review-request-changes-missing", name: "Review request changes missing" })
+      .expect(201);
+    const missingConfigCase = await http
+      .post(`/api/pipelines/${defaultPipeline.body.id}/cases`)
+      .send({ caseKey: "missing-config", title: "Missing config" })
+      .expect(201);
+    await http.post(`/api/cases/${missingConfigCase.body.case.id}/transition`).send({ toStageKey: "review", expectedVersion: 1 }).expect(200);
+    const missingConfig = await http
+      .post(`/api/cases/${missingConfigCase.body.case.id}/review`)
+      .send({ decision: "request_changes", reason: "Needs a loop", expectedVersion: 2 })
+      .expect(422);
+    expect(missingConfig.body.code).toBe("validation");
+  });
+
   it("aggregates the review inbox across pipelines with parent and review config context", async () => {
     const company = await seedCompany();
     const http = request(app(boardActor));
@@ -634,7 +723,30 @@ describeEmbeddedPostgres("pipeline routes", () => {
   it("bulk reviews partial successes without aborting stale items", async () => {
     const company = await seedCompany();
     const http = request(app(boardActor));
-    const pipeline = await http.post(`/api/companies/${company.id}/pipelines`).send({ key: "bulk-review", name: "Bulk review" }).expect(201);
+    const pipeline = await http
+      .post(`/api/companies/${company.id}/pipelines`)
+      .send({
+        key: "bulk-review",
+        name: "Bulk review",
+        stages: [
+          { key: "intake", name: "Intake", kind: "open", position: 100 },
+          { key: "in_progress", name: "In progress", kind: "working", position: 200 },
+          {
+            key: "review",
+            name: "Review",
+            kind: "review",
+            position: 300,
+            config: {
+              approveToStageKey: "done",
+              rejectToStageKey: "cancelled",
+              requestChangesToStageKey: "in_progress",
+            },
+          },
+          { key: "done", name: "Done", kind: "done", position: 900 },
+          { key: "cancelled", name: "Cancelled", kind: "cancelled", position: 1000 },
+        ],
+      })
+      .expect(201);
     const caseIds: string[] = [];
     for (let index = 0; index < 50; index += 1) {
       const created = await http
@@ -650,13 +762,19 @@ describeEmbeddedPostgres("pipeline routes", () => {
 
     const bulk = await http
       .post(`/api/companies/${company.id}/review-cases/bulk`)
-      .send({ items: caseIds.map((caseId) => ({ caseId, decision: "approve", expectedVersion: 2 })) })
+      .send({
+        items: caseIds.map((caseId, index) => index === 3
+          ? { caseId, decision: "request_changes", reason: "Revise this item", expectedVersion: 2 }
+          : { caseId, decision: "approve", expectedVersion: 2 }),
+      })
       .expect(200);
 
     expect(bulk.body.results.filter((item: { ok: boolean }) => item.ok)).toHaveLength(47);
     const failed = bulk.body.results.filter((item: { ok: boolean }) => !item.ok);
     expect(failed).toHaveLength(3);
     expect(failed.every((item: { error: { code: string } }) => item.error.code === "version_conflict")).toBe(true);
+    const requestChangesDetail = await http.get(`/api/cases/${caseIds[3]}`).expect(200);
+    expect(requestChangesDetail.body.stage.key).toBe("in_progress");
   });
 
   it("returns conflict bodies with code, current version, and stage", async () => {

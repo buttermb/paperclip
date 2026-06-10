@@ -54,6 +54,7 @@ export type PipelineStageConfig = Record<string, unknown> & {
   autoAdvanceOnChildrenTerminal?: string;
   approveToStageKey?: string;
   rejectToStageKey?: string;
+  requestChangesToStageKey?: string;
   requireRejectReason?: boolean;
   reviewerKind?: "human" | "any";
   onEnter?: {
@@ -62,6 +63,8 @@ export type PipelineStageConfig = Record<string, unknown> & {
     id?: string;
   };
 };
+
+export type PipelineReviewDecision = "approve" | "reject" | "request_changes";
 
 export type PipelineAutomationExecutionResult =
   | { status: "none" }
@@ -156,6 +159,12 @@ function normalizeStageConfig(kind: PipelineStageKind | string, config?: Pipelin
   if (typeof next.rejectToStageKey !== "string" || next.rejectToStageKey.trim().length === 0) {
     throw unprocessable("Review stages require rejectToStageKey", { code: "validation" });
   }
+  if (
+    next.requestChangesToStageKey !== undefined &&
+    (typeof next.requestChangesToStageKey !== "string" || next.requestChangesToStageKey.trim().length === 0)
+  ) {
+    throw unprocessable("Review stage requestChangesToStageKey must be a non-empty string", { code: "validation" });
+  }
   if (next.requireRejectReason !== undefined && typeof next.requireRejectReason !== "boolean") {
     throw unprocessable("Review stage requireRejectReason must be boolean", { code: "validation" });
   }
@@ -167,6 +176,7 @@ function normalizeStageConfig(kind: PipelineStageKind | string, config?: Pipelin
     ...next,
     approveToStageKey: next.approveToStageKey.trim(),
     rejectToStageKey: next.rejectToStageKey.trim(),
+    ...(next.requestChangesToStageKey !== undefined ? { requestChangesToStageKey: next.requestChangesToStageKey.trim() } : {}),
     requireRejectReason: next.requireRejectReason ?? true,
     reviewerKind: next.reviewerKind ?? "human",
   };
@@ -188,6 +198,18 @@ function assertReviewTargetsInSet(
   if (!stageKeys.has(config.rejectToStageKey!)) {
     throw unprocessable("Review rejectToStageKey references an unknown stage", { code: "validation" });
   }
+  if (config.requestChangesToStageKey !== undefined && !stageKeys.has(config.requestChangesToStageKey)) {
+    throw unprocessable("Review requestChangesToStageKey references an unknown stage", { code: "validation" });
+  }
+}
+
+function targetStageKeyForReviewDecision(config: PipelineStageConfig, decision: PipelineReviewDecision) {
+  if (decision === "approve") return config.approveToStageKey!;
+  if (decision === "reject") return config.rejectToStageKey!;
+  if (!config.requestChangesToStageKey) {
+    throw unprocessable("Review stage does not configure requestChangesToStageKey", { code: "validation" });
+  }
+  return config.requestChangesToStageKey;
 }
 
 function stageAutomation(stage: typeof pipelineStages.$inferSelect) {
@@ -1605,7 +1627,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
     async reviewCase(input: {
       companyId: string;
       caseId: string;
-      decision: "approve" | "reject";
+      decision: PipelineReviewDecision;
       reason?: string | null;
       edits?: {
         title?: string;
@@ -1626,10 +1648,10 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         if (input.actor.type === "agent" && config.reviewerKind !== "any") {
           throw new HttpError(403, "Human review is required", { code: "review_required" });
         }
-        if (input.decision === "reject" && config.requireRejectReason !== false && !input.reason?.trim()) {
-          throw unprocessable("Reject reason is required", { code: "validation" });
+        if (input.decision !== "approve" && config.requireRejectReason !== false && !input.reason?.trim()) {
+          throw unprocessable("Review decision reason is required", { code: "validation" });
         }
-        const toStageKey = input.decision === "approve" ? config.approveToStageKey! : config.rejectToStageKey!;
+        const toStageKey = targetStageKeyForReviewDecision(config, input.decision);
         const suggestionId = detail.case.pendingSuggestion?.id ?? null;
         let expectedVersion = input.expectedVersion;
         let updateEvent: typeof pipelineCaseEvents.$inferSelect | null = null;

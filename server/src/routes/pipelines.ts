@@ -125,7 +125,7 @@ const reviewEditsSchema = z.object({
   parentCaseId: z.string().uuid().nullable().optional(),
 });
 const reviewCaseSchema = z.object({
-  decision: z.enum(["approve", "reject"]),
+  decision: z.enum(["approve", "reject", "request_changes"]),
   reason: z.string().max(4_000).nullable().optional(),
   edits: reviewEditsSchema.optional(),
   expectedVersion: z.number().int().positive(),

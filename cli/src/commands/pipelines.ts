@@ -168,6 +168,7 @@ interface ResolveSuggestionOptions extends PipelineOptions {
 interface ReviewOptions extends PipelineOptions {
   approve?: boolean;
   reject?: boolean;
+  requestChanges?: boolean;
   reason?: string;
   expectedVersion: string;
   editsJson?: string;
@@ -404,7 +405,7 @@ export function registerPipelineCommands(program: Command): void {
   addPipelineOptions(
     pipelines
       .command("review-bulk")
-      .description("Apply bulk review decisions")
+      .description("Apply bulk review decisions: approve, reject, or request_changes")
       .requiredOption("--file <path>", "JSON file containing an array or { items }")
       .action((opts: ReviewBulkOptions) => withPipelineErrors(async () => {
         const ctx = resolvePipelineContext(opts);
@@ -575,10 +576,11 @@ function registerCaseCommands(caseCommand: Command): void {
   addPipelineOptions(
     caseCommand
       .command("review")
-      .description("Approve or reject a case in a review stage")
+      .description("Approve, reject, or request changes for a case in a review stage")
       .argument("<caseId>", "Case ID")
       .option("--approve", "Approve the case")
       .option("--reject", "Reject the case")
+      .option("--request-changes", "Request changes for the case")
       .option("--reason <text>", "Decision reason")
       .requiredOption("--expected-version <n>", "Expected case version")
       .option("--edits-json <json>", "Review edits JSON")
@@ -590,7 +592,7 @@ function registerCaseCommands(caseCommand: Command): void {
       .option("--lease-token <token>", "Lease token")
       .action((caseId: string, opts: ReviewOptions) => withPipelineErrors(async () => {
         const ctx = resolvePipelineContext(opts);
-        const decision = exactlyOneFlag(opts.approve, opts.reject, "--approve", "--reject") === "--approve" ? "approve" : "reject";
+        const decision = reviewDecisionFromOptions(opts);
         const edits = await buildReviewEdits(opts);
         printOutput(await ctx.api.post(apiPath`/api/cases/${caseId}/review`, {
           decision,
@@ -724,6 +726,18 @@ function looksLikeUuid(value: string): boolean {
 function exactlyOneFlag(first: boolean | undefined, second: boolean | undefined, firstName: string, secondName: string): string {
   if (Boolean(first) === Boolean(second)) throw new Error(`Pass exactly one of ${firstName} or ${secondName}.`);
   return first ? firstName : secondName;
+}
+
+function reviewDecisionFromOptions(opts: ReviewOptions): "approve" | "reject" | "request_changes" {
+  const selected = [
+    opts.approve ? { flag: "--approve", decision: "approve" as const } : null,
+    opts.reject ? { flag: "--reject", decision: "reject" as const } : null,
+    opts.requestChanges ? { flag: "--request-changes", decision: "request_changes" as const } : null,
+  ].filter((item): item is NonNullable<typeof item> => item !== null);
+  if (selected.length !== 1) {
+    throw new Error("Pass exactly one of --approve, --reject, or --request-changes.");
+  }
+  return selected[0]!.decision;
 }
 
 function printPipeline(row: PipelineDetail | PipelineSummary | null, ctx: ResolvedClientContext): void {
