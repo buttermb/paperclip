@@ -22,8 +22,11 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { cn, relativeTime } from "@/lib/utils";
 import { documentAnnotationsApi } from "@/api/document-annotations";
+import { AgentIcon } from "./AgentIconPicker";
+import { deriveInitials } from "./Identity";
 import { MarkdownBody } from "./MarkdownBody";
 import type { PendingAnchor } from "./DocumentAnnotationLayer";
 import type { Agent } from "@paperclipai/shared";
@@ -63,7 +66,7 @@ export interface AnnotationPanelProps {
   desktopWidth?: number;
   className?: string;
   /** Resolve `<authorAgentId>` to a display name. */
-  agentMap?: ReadonlyMap<string, Pick<Agent, "id" | "name">>;
+  agentMap?: ReadonlyMap<string, Pick<Agent, "id" | "name"> & Partial<Pick<Agent, "icon">>>;
   /** Resolve `<authorUserId>` to a display name. */
   userProfileMap?: ReadonlyMap<string, CompanyUserProfile>;
 }
@@ -312,7 +315,21 @@ function AnnotationPanelBody(props: AnnotationPanelProps) {
             rows={3}
             value={composerValue}
             onChange={(event) => setComposerValue(event.target.value)}
-            placeholder="Write a comment…"
+            onKeyDown={(event) => {
+              if (isSubmitShortcut(event)) {
+                event.preventDefault();
+                const body = composerValue.trim();
+                if (
+                  body
+                  && !createThread.isPending
+                  && !props.newCommentDisabled
+                  && props.baseRevisionId
+                ) {
+                  createThread.mutate(body);
+                }
+              }
+            }}
+            placeholder="Write a comment… (⌘↵ to submit)"
             disabled={props.newCommentDisabled}
             className="resize-y rounded-none text-sm"
           />
@@ -365,7 +382,7 @@ function ThreadCard(props: {
   onCopyLink: () => void;
   pendingReply: boolean;
   pendingStatus: boolean;
-  agentMap?: ReadonlyMap<string, Pick<Agent, "id" | "name">>;
+  agentMap?: ReadonlyMap<string, Pick<Agent, "id" | "name"> & Partial<Pick<Agent, "icon">>>;
   userProfileMap?: ReadonlyMap<string, CompanyUserProfile>;
 }) {
   const { thread } = props;
@@ -427,7 +444,15 @@ function ThreadCard(props: {
               rows={2}
               value={props.replyDraft}
               onChange={(event) => props.onReplyChange(event.target.value)}
-              placeholder="Reply…"
+              onKeyDown={(event) => {
+                if (isSubmitShortcut(event)) {
+                  event.preventDefault();
+                  if (props.replyDraft.trim() && !props.pendingReply) {
+                    props.onSubmitReply();
+                  }
+                }
+              }}
+              placeholder="Reply… (⌘↵ to submit)"
               className="resize-y rounded-none text-sm"
               disabled={props.pendingReply}
             />
@@ -506,7 +531,7 @@ function CommentRow({
 }: {
   comment: DocumentAnnotationComment;
   focused: boolean;
-  agentMap?: ReadonlyMap<string, Pick<Agent, "id" | "name">>;
+  agentMap?: ReadonlyMap<string, Pick<Agent, "id" | "name"> & Partial<Pick<Agent, "icon">>>;
   userProfileMap?: ReadonlyMap<string, CompanyUserProfile>;
 }) {
   const author = resolveAuthor(comment, { agentMap, userProfileMap });
@@ -520,31 +545,49 @@ function CommentRow({
       )}
     >
       <div className="mb-0.5 flex items-center justify-between gap-2 text-[11px]">
-        <span className="min-w-0 truncate">
-          <span className="font-medium text-foreground">{author.name}</span>
+        <span className="flex min-w-0 items-center gap-1.5">
+          <Avatar size="xs" className="shrink-0">
+            {author.role === "agent" ? (
+              <AvatarFallback>
+                <AgentIcon icon={author.agentIcon} className="h-3 w-3" />
+              </AvatarFallback>
+            ) : (
+              <>
+                {author.imageUrl ? <AvatarImage src={author.imageUrl} alt={author.name} /> : null}
+                <AvatarFallback>{deriveInitials(author.name)}</AvatarFallback>
+              </>
+            )}
+          </Avatar>
+          <span className="truncate font-medium text-foreground">{author.name}</span>
           {author.role === "agent" ? (
-            <span className="ml-1 text-muted-foreground">· agent</span>
+            <span className="text-muted-foreground">· agent</span>
           ) : null}
         </span>
-        <span className="text-muted-foreground">{relativeTime(comment.createdAt)}</span>
+        <span className="shrink-0 text-muted-foreground">{relativeTime(comment.createdAt)}</span>
       </div>
       <MarkdownBody className="text-sm leading-6">{comment.body}</MarkdownBody>
     </div>
   );
 }
 
+/** ⌘/Ctrl + Enter submits the composer or reply. */
+function isSubmitShortcut(event: React.KeyboardEvent<HTMLTextAreaElement>): boolean {
+  return event.key === "Enter" && (event.metaKey || event.ctrlKey);
+}
+
 function resolveAuthor(
   comment: DocumentAnnotationComment,
   maps: {
-    agentMap?: ReadonlyMap<string, Pick<Agent, "id" | "name">>;
+    agentMap?: ReadonlyMap<string, Pick<Agent, "id" | "name"> & Partial<Pick<Agent, "icon">>>;
     userProfileMap?: ReadonlyMap<string, CompanyUserProfile>;
   },
-): { name: string; role: "board" | "agent" } {
+): { name: string; role: "board" | "agent"; agentIcon?: Agent["icon"]; imageUrl?: string | null } {
   if (comment.authorAgentId) {
     const agent = maps.agentMap?.get(comment.authorAgentId);
     return {
       name: agent?.name ?? comment.authorAgentId.slice(0, 8),
       role: "agent",
+      agentIcon: agent?.icon,
     };
   }
   if (comment.authorUserId) {
@@ -552,6 +595,7 @@ function resolveAuthor(
     return {
       name: profile?.label ?? comment.authorUserId.slice(0, 8),
       role: "board",
+      imageUrl: profile?.image ?? null,
     };
   }
   return { name: comment.authorType === "agent" ? "Agent" : "Board", role: comment.authorType === "agent" ? "agent" : "board" };

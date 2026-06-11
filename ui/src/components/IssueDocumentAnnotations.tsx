@@ -34,7 +34,7 @@ export interface IssueDocumentAnnotationsProps {
   /** Controlled panel state. Caller owns this so the count chip can live in the doc header. */
   panelOpen: boolean;
   onPanelOpenChange: (open: boolean) => void;
-  agentMap?: ReadonlyMap<string, Pick<Agent, "id" | "name">>;
+  agentMap?: ReadonlyMap<string, Pick<Agent, "id" | "name"> & Partial<Pick<Agent, "icon">>>;
   userProfileMap?: ReadonlyMap<string, CompanyUserProfile>;
   /** Seed which thread is focused on mount. Used by Storybook/screenshot harness. */
   defaultFocusedThreadId?: string;

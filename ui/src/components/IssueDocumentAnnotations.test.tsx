@@ -110,6 +110,12 @@ function setTextareaValue(textarea: HTMLTextAreaElement, value: string) {
   textarea.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+function dispatchSubmitShortcut(textarea: HTMLTextAreaElement) {
+  textarea.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }),
+  );
+}
+
 function makeQueryClient() {
   return new QueryClient({
     defaultOptions: {
@@ -555,11 +561,15 @@ describe("IssueDocumentAnnotations", () => {
     await act(async () => threadCard!.click());
     await flush();
 
-    const expandedText = container.querySelector('[data-thread-id="open-1"]')?.textContent ?? "";
+    const expandedThread = container.querySelector('[data-thread-id="open-1"]');
+    const expandedText = expandedThread?.textContent ?? "";
     expect(expandedText).toContain("Dotta");
     expect(expandedText).not.toContain("· board");
     expect(expandedText).toContain("UXDesigner");
     expect(expandedText).toContain("· agent");
+    // Each rendered comment shows an author avatar.
+    const avatars = expandedThread?.querySelectorAll('[data-slot="avatar"]') ?? [];
+    expect(avatars.length).toBe(2);
   });
 
   it("does not render a persistent New comment on selection hint when panel is open", async () => {
@@ -677,6 +687,79 @@ describe("IssueDocumentAnnotations", () => {
       body: "New anchored comment",
     });
     expect(mockAnnotationsApi.list.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it("submits a new anchored comment with ⌘↵", async () => {
+    mockAnnotationsApi.list.mockResolvedValue([]);
+    mockAnnotationsApi.create.mockResolvedValue(makeThread({ id: "created-1" }));
+    const root = createRoot(container);
+    const queryClient = makeQueryClient();
+    const doc = makeDoc();
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <Harness doc={doc} initialPanelOpen />
+        </QueryClientProvider>,
+      );
+    });
+    await flush();
+    await flush();
+
+    const selectButton = container.querySelector('[data-testid="mock-annotation-selection"]') as HTMLButtonElement | null;
+    await act(async () => selectButton!.click());
+    await flush();
+
+    const composer = container.querySelector('[data-testid="document-annotation-composer"]') as HTMLTextAreaElement | null;
+    expect(composer).not.toBeNull();
+    await act(async () => setTextareaValue(composer!, "Submitted via shortcut"));
+    await flush();
+    await act(async () => dispatchSubmitShortcut(composer!));
+    await flush();
+    await flush();
+
+    expect(mockAnnotationsApi.create).toHaveBeenCalledWith("issue-1", "plan", {
+      baseRevisionId: "rev-4",
+      baseRevisionNumber: 4,
+      selector: mockPendingAnchor.selector,
+      body: "Submitted via shortcut",
+    });
+  });
+
+  it("submits a reply with ⌘↵", async () => {
+    mockAnnotationsApi.list.mockResolvedValue([makeThread({ id: "open-1" })]);
+    mockAnnotationsApi.addComment.mockResolvedValue(makeThread({ id: "open-1" }).comments[0]);
+    const root = createRoot(container);
+    const queryClient = makeQueryClient();
+    const doc = makeDoc();
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <Harness doc={doc} initialPanelOpen />
+        </QueryClientProvider>,
+      );
+    });
+    await flush();
+    await flush();
+
+    const openThread = container.querySelector('[data-thread-id="open-1"]') as HTMLElement | null;
+    await act(async () => openThread!.click());
+    await flush();
+
+    const reply = container.querySelector(
+      '[data-testid="document-annotation-reply-open-1"]',
+    ) as HTMLTextAreaElement | null;
+    expect(reply).not.toBeNull();
+    await act(async () => setTextareaValue(reply!, "Replying via shortcut"));
+    await flush();
+    await act(async () => dispatchSubmitShortcut(reply!));
+    await flush();
+    await flush();
+
+    expect(mockAnnotationsApi.addComment).toHaveBeenCalledWith("issue-1", "plan", "open-1", {
+      body: "Replying via shortcut",
+    });
   });
 
   it("shows resolve and reopen actions and updates thread status", async () => {
