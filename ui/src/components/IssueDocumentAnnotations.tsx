@@ -105,7 +105,12 @@ export function IssueDocumentAnnotations({
         boundaryWidth - DESKTOP_ANNOTATION_PANEL_VIEWPORT_MARGIN * 2,
       );
       const desiredWidth = Math.min(DESKTOP_ANNOTATION_PANEL_WIDTH, maxPanelWidth);
-      const top = Math.max(DESKTOP_ANNOTATION_PANEL_VIEWPORT_MARGIN, rect.top);
+      // Clamp the panel below the sticky top nav (the scroll container's top edge)
+      // so the comments thread never tucks under the nav bar while scrolling.
+      const boundaryTop = boundaryRect?.top ?? DESKTOP_ANNOTATION_PANEL_VIEWPORT_MARGIN;
+      const minTop = Math.max(DESKTOP_ANNOTATION_PANEL_VIEWPORT_MARGIN, boundaryTop)
+        + DESKTOP_ANNOTATION_PANEL_VIEWPORT_MARGIN;
+      const top = Math.max(minTop, rect.top);
       const desiredLeft = rect.right + DESKTOP_ANNOTATION_PANEL_GAP;
       const spaceRightOfDocument = boundaryRight
         - desiredLeft
@@ -328,6 +333,7 @@ export function IssueDocumentAnnotations({
             newCommentDisabledReason={newCommentDisabledReason}
             hideResolved
             captureSelectionRequestId={captureSelectionRequestId}
+            pendingHighlightText={composerAnchor?.selectedText ?? null}
           />
         ) : null}
       </section>

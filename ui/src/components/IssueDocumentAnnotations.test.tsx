@@ -448,10 +448,11 @@ describe("IssueDocumentAnnotations", () => {
     expect(reason!.textContent).toMatch(/draft/i);
   });
 
-  it("filters resolved threads behind their tab", async () => {
+  it("shows open and resolved threads together in a single list (no filter tabs)", async () => {
     mockAnnotationsApi.list.mockResolvedValue([
       makeThread({ id: "open-1" }),
       makeThread({ id: "resolved-1", status: "resolved" }),
+      makeThread({ id: "orphan-1", anchorState: "orphaned" }),
     ]);
     const root = createRoot(container);
     const queryClient = makeQueryClient();
@@ -467,19 +468,17 @@ describe("IssueDocumentAnnotations", () => {
     await flush();
     await flush();
 
-    // Open filter shows only open
+    // Open + resolved both render without any filter interaction.
     expect(container.querySelector('[data-thread-id="open-1"]')).not.toBeNull();
-    expect(container.querySelector('[data-thread-id="resolved-1"]')).toBeNull();
-
-    // Switch to Resolved
-    const resolvedTab = Array.from(container.querySelectorAll("button")).find(
-      (button) => button.textContent?.startsWith("Resolved"),
-    );
-    expect(resolvedTab).not.toBeUndefined();
-    await act(async () => resolvedTab!.click());
-    await flush();
-
     expect(container.querySelector('[data-thread-id="resolved-1"]')).not.toBeNull();
+    // Orphaned threads can't be anchored in the doc, so they stay hidden.
+    expect(container.querySelector('[data-thread-id="orphan-1"]')).toBeNull();
+
+    // The Open/Resolved/Stale/Orphaned filter chips are gone.
+    const filterChip = Array.from(container.querySelectorAll("button")).find((button) =>
+      ["Open", "Resolved", "Stale", "Orphaned"].includes((button.textContent ?? "").trim()),
+    );
+    expect(filterChip).toBeUndefined();
   });
 
   it("renders author name + role from agent and user maps", async () => {
@@ -795,13 +794,7 @@ describe("IssueDocumentAnnotations", () => {
     await flush();
     expect(mockAnnotationsApi.updateStatus).toHaveBeenCalledWith("issue-1", "plan", "open-1", "resolved");
 
-    const resolvedTab = Array.from(container.querySelectorAll("button")).find(
-      (button) => button.textContent?.startsWith("Resolved"),
-    );
-    expect(resolvedTab).not.toBeUndefined();
-    await act(async () => resolvedTab!.click());
-    await flush();
-
+    // Resolved threads stay in the same list (filter tabs were removed).
     const resolvedThread = container.querySelector('[data-thread-id="resolved-1"]') as HTMLElement | null;
     expect(resolvedThread).not.toBeNull();
     await act(async () => resolvedThread!.click());
