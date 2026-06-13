@@ -23,6 +23,10 @@ export type PipelineHealthWarningCode =
   | "review_no_approver"
   | "missing_pipeline_reference"
   | "missing_stage_reference"
+  | "breakdown_target_missing"
+  | "breakdown_no_wait"
+  | "breakdown_field_mismatch"
+  | "breakdown_target_not_entry_safe"
   | "unset_required_variable";
 
 export interface PipelineHealthWarning {
@@ -55,6 +59,8 @@ export interface PipelineHealthAgentRef {
 export interface PipelineHealthStageRef {
   key: string;
   name: string;
+  kind?: string;
+  config?: Record<string, unknown> | null;
 }
 
 export interface PipelineHealthPipelineRef {
@@ -97,6 +103,7 @@ type StageConfig = {
   assigneeAgentId?: unknown;
   automation?: unknown;
   autoAdvanceOnChildrenTerminal?: unknown;
+  breakdown?: unknown;
   onEnter?: unknown;
   requireApproval?: unknown;
   requireChildrenTerminal?: unknown;
@@ -127,6 +134,8 @@ function hasOnEnterRoutineAutomation(config: StageConfig): boolean {
 }
 
 function hasChildrenGateAutoAdvance(config: StageConfig): boolean {
+  const breakdown = readBreakdownConfig(config);
+  if (breakdown) return breakdown.waitForPieces && breakdown.whenFinishedMoveTo !== null;
   return config.requireChildrenTerminal === true &&
     typeof config.autoAdvanceOnChildrenTerminal === "string" &&
     config.autoAdvanceOnChildrenTerminal.trim().length > 0;
@@ -134,7 +143,7 @@ function hasChildrenGateAutoAdvance(config: StageConfig): boolean {
 
 /** True when a stage has saved automation that can move work forward. */
 function hasRunnableStageAutomation(config: StageConfig): boolean {
-  return hasOnEnterRoutineAutomation(config) || hasChildrenGateAutoAdvance(config);
+  return readBreakdownConfig(config) !== null || hasOnEnterRoutineAutomation(config) || hasChildrenGateAutoAdvance(config);
 }
 
 function automationAssigneeAgentId(config: StageConfig): string | null {
@@ -171,6 +180,48 @@ function hasDefaultValue(entry: Record<string, unknown>): boolean {
   return typeof value === "number" || typeof value === "boolean";
 }
 
+function readBreakdownConfig(config: StageConfig) {
+  const raw = config.breakdown;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const targetPipelineId = typeof record.targetPipelineId === "string" && record.targetPipelineId.trim()
+    ? record.targetPipelineId.trim()
+    : null;
+  const targetStageKey = typeof record.targetStageKey === "string" && record.targetStageKey.trim()
+    ? record.targetStageKey.trim()
+    : null;
+  const pieceNoun = typeof record.pieceNoun === "string" && record.pieceNoun.trim()
+    ? record.pieceNoun.trim()
+    : "piece";
+  const inheritFields = Array.isArray(record.inheritFields)
+    ? record.inheritFields.filter((field): field is string => typeof field === "string" && field.trim().length > 0).map((field) => field.trim())
+    : [];
+  const whenFinishedMoveTo = typeof record.whenFinishedMoveTo === "string" && record.whenFinishedMoveTo.trim()
+    ? record.whenFinishedMoveTo.trim()
+    : typeof config.autoAdvanceOnChildrenTerminal === "string" && config.autoAdvanceOnChildrenTerminal.trim()
+      ? config.autoAdvanceOnChildrenTerminal.trim()
+      : null;
+  return {
+    targetPipelineId,
+    targetStageKey,
+    pieceNoun,
+    inheritFields,
+    waitForPieces: record.waitForPieces === undefined ? config.requireChildrenTerminal === true : record.waitForPieces === true,
+    whenFinishedMoveTo,
+  };
+}
+
+function intakeFieldKeys(stage: PipelineHealthStageRef | undefined) {
+  const config = asConfig(stage?.config);
+  const variables = Array.isArray(config.variables) ? config.variables : [];
+  return new Set(variables.flatMap((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    const entry = raw as Record<string, unknown>;
+    const name = readVariableName(entry);
+    return name ? [name] : [];
+  }));
+}
+
 export function computePipelineHealth(input: PipelineHealthInput): PipelineHealthReport {
   const warnings: PipelineHealthWarning[] = [];
 
@@ -182,6 +233,7 @@ export function computePipelineHealth(input: PipelineHealthInput): PipelineHealt
     const assigneeAgentId = automationAssigneeAgentId(config);
     const hasStageAutomation = hasRunnableStageAutomation(config);
     const isTerminalStage = isPipelineTerminalStageKind(stage.kind);
+    const breakdown = readBreakdownConfig(config);
 
     // 1. A teammate is assigned to run this step, but they're paused / gone.
     if (assigneeAgentId) {
@@ -258,8 +310,53 @@ export function computePipelineHealth(input: PipelineHealthInput): PipelineHealt
       }
     }
 
-    // 6. Instructions that hand off to a pipeline / step that no longer exists.
-    if (instructionsBody) {
+    // 6. First-class breakdown references. These replace prose scanning on
+    // breakdown stages because the target workflow is now config, not copy.
+    if (breakdown) {
+      const target = breakdown.targetPipelineId ? input.pipelinesById[breakdown.targetPipelineId] : undefined;
+      const targetStage = breakdown.targetStageKey
+        ? target?.stages.find((s) => s.key === breakdown.targetStageKey)
+        : undefined;
+      if (!target || !targetStage) {
+        warnings.push({
+          ...anchor,
+          code: "breakdown_target_missing",
+          message: `This step breaks work into another workflow, but that destination is missing. Pick where the pieces should go.`,
+        });
+      } else {
+        if (!breakdown.waitForPieces || !breakdown.whenFinishedMoveTo) {
+          warnings.push({
+            ...anchor,
+            code: "breakdown_no_wait",
+            message: `This step creates ${breakdown.pieceNoun}s but does not wait for them before moving on. Turn on waiting if the next step depends on the pieces finishing.`,
+          });
+        }
+        const targetKeys = intakeFieldKeys(targetStage);
+        const missingInherited = breakdown.inheritFields.filter((field) => !targetKeys.has(field));
+        if (missingInherited.length > 0) {
+          warnings.push({
+            ...anchor,
+            code: "breakdown_field_mismatch",
+            message: `Some copied details do not exist on the destination form: ${missingInherited.join(", ")}. Update the destination form or stop copying them.`,
+          });
+        }
+        const targetConfig = asConfig(targetStage.config);
+        const firstStage = target.stages[0];
+        if (
+          firstStage?.key !== targetStage.key ||
+          targetStage.kind === "review" ||
+          isPipelineTerminalStageKind(targetStage.kind) ||
+          targetConfig.disabled === true ||
+          targetConfig.requireApproval === true
+        ) {
+          warnings.push({
+            ...anchor,
+            code: "breakdown_target_not_entry_safe",
+            message: `New ${breakdown.pieceNoun}s start in a destination step that may not accept new work cleanly. Choose the entry step for that workflow.`,
+          });
+        }
+      }
+    } else if (instructionsBody) {
       for (const mention of extractPipelineMentions(instructionsBody)) {
         const target = input.pipelinesById[mention.pipelineId];
         if (!target) {

@@ -92,6 +92,15 @@ export type PipelineStageConfig = Record<string, unknown> & {
     assigneeAgentId?: string | null;
     instructionsBody?: string | null;
   };
+  breakdown?: {
+    targetPipelineId?: unknown;
+    targetStageKey?: unknown;
+    pieceNoun?: unknown;
+    inheritFields?: unknown;
+    advanceTo?: unknown;
+    waitForPieces?: unknown;
+    whenFinishedMoveTo?: unknown;
+  };
   onEnter?: {
     type?: "run_routine";
     routineId?: string;
@@ -234,6 +243,84 @@ function stageConfig(stage: typeof pipelineStages.$inferSelect): PipelineStageCo
   return (stage.config ?? {}) as PipelineStageConfig;
 }
 
+export interface PipelineBreakdownConfig {
+  targetPipelineId: string;
+  targetStageKey: string;
+  pieceNoun: string;
+  inheritFields: string[];
+  advanceTo: string | null;
+  waitForPieces: boolean;
+  whenFinishedMoveTo: string | null;
+}
+
+function readOptionalStageKey(value: unknown, label: string) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw unprocessable(`${label} must be a non-empty string`, { code: "validation" });
+  }
+  return value.trim();
+}
+
+function readStringList(value: unknown, label: string) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw unprocessable(`${label} must be an array`, { code: "validation" });
+  const seen = new Set<string>();
+  return value.flatMap((entry) => {
+    if (typeof entry !== "string" || entry.trim().length === 0) {
+      throw unprocessable(`${label} entries must be non-empty strings`, { code: "validation" });
+    }
+    const key = entry.trim();
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [key];
+  });
+}
+
+function readBreakdownConfig(config?: PipelineStageConfig | null): PipelineBreakdownConfig | null {
+  const raw = config?.breakdown;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const targetPipelineId = typeof raw.targetPipelineId === "string" && raw.targetPipelineId.trim()
+    ? raw.targetPipelineId.trim()
+    : null;
+  const targetStageKey = typeof raw.targetStageKey === "string" && raw.targetStageKey.trim()
+    ? raw.targetStageKey.trim()
+    : null;
+  if (!targetPipelineId) throw unprocessable("Breakdown targetPipelineId is required", { code: "validation" });
+  if (!targetStageKey) throw unprocessable("Breakdown targetStageKey is required", { code: "validation" });
+  const pieceNoun = typeof raw.pieceNoun === "string" && raw.pieceNoun.trim()
+    ? raw.pieceNoun.trim()
+    : "piece";
+  const waitForPieces = raw.waitForPieces === undefined
+    ? config?.requireChildrenTerminal === true
+    : raw.waitForPieces === true;
+  const whenFinishedMoveTo = readOptionalStageKey(
+    raw.whenFinishedMoveTo ?? config?.autoAdvanceOnChildrenTerminal,
+    "Breakdown whenFinishedMoveTo",
+  );
+  return {
+    targetPipelineId,
+    targetStageKey,
+    pieceNoun,
+    inheritFields: readStringList(raw.inheritFields, "Breakdown inheritFields"),
+    advanceTo: readOptionalStageKey(raw.advanceTo, "Breakdown advanceTo"),
+    waitForPieces,
+    whenFinishedMoveTo,
+  };
+}
+
+function childrenGateConfig(config?: PipelineStageConfig | null) {
+  const breakdown = readBreakdownConfig(config);
+  return {
+    requireChildrenTerminal: breakdown?.waitForPieces ?? config?.requireChildrenTerminal === true,
+    autoAdvanceOnChildrenTerminal: breakdown?.whenFinishedMoveTo ?? (
+      typeof config?.autoAdvanceOnChildrenTerminal === "string" && config.autoAdvanceOnChildrenTerminal.trim()
+        ? config.autoAdvanceOnChildrenTerminal.trim()
+        : null
+    ),
+    explicitZeroChildrenPass: Boolean(breakdown && breakdown.waitForPieces),
+  };
+}
+
 function readStageAutomationRequest(config?: PipelineStageConfig | null) {
   const automation = config?.automation;
   if (!automation || typeof automation !== "object" || Array.isArray(automation)) return null;
@@ -303,6 +390,22 @@ function normalizeStageConfig(kind: PipelineStageKind | string, config?: Pipelin
   }
   if (next.requireNoUnresolvedDrift !== undefined && typeof next.requireNoUnresolvedDrift !== "boolean") {
     throw unprocessable("Stage requireNoUnresolvedDrift must be boolean", { code: "validation" });
+  }
+  if (next.breakdown !== undefined) {
+    if (!next.breakdown || typeof next.breakdown !== "object" || Array.isArray(next.breakdown)) {
+      throw unprocessable("Stage breakdown must be an object", { code: "validation" });
+    }
+    const breakdown = readBreakdownConfig(next);
+    next.breakdown = {
+      ...(next.breakdown as Record<string, unknown>),
+      targetPipelineId: breakdown!.targetPipelineId,
+      targetStageKey: breakdown!.targetStageKey,
+      pieceNoun: breakdown!.pieceNoun,
+      inheritFields: breakdown!.inheritFields,
+      ...(breakdown!.advanceTo ? { advanceTo: breakdown!.advanceTo } : {}),
+      waitForPieces: breakdown!.waitForPieces,
+      ...(breakdown!.whenFinishedMoveTo ? { whenFinishedMoveTo: breakdown!.whenFinishedMoveTo } : {}),
+    };
   }
 
   if (reviewerKind !== undefined && reviewerKind !== "human" && reviewerKind !== "any") {
@@ -506,6 +609,73 @@ function validateAddFormFieldsForStage(stage: typeof pipelineStages.$inferSelect
   }
 }
 
+interface PipelineIntakeField {
+  key: string;
+  label: string;
+  type: "text" | "textarea" | "number" | "boolean" | "select" | "multiline";
+  required: boolean;
+  options: string[];
+}
+
+function intakeFieldsForStage(stage: typeof pipelineStages.$inferSelect): PipelineIntakeField[] {
+  const variables = stageConfig(stage).variables;
+  if (!Array.isArray(variables)) return [];
+  return variables.flatMap((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    const variable = raw as Record<string, unknown>;
+    const routineName = typeof variable.name === "string" && variable.name.trim() ? variable.name.trim() : null;
+    const legacyKey = typeof variable.key === "string" && variable.key.trim() ? variable.key.trim() : null;
+    const key = routineName ?? (variable.showInAddForm === true ? legacyKey : null);
+    if (!key) return [];
+    const label = typeof variable.label === "string" && variable.label.trim() ? variable.label.trim() : key;
+    const options = Array.isArray(variable.options)
+      ? variable.options.filter((option): option is string => typeof option === "string" && option.trim().length > 0)
+      : [];
+    const rawType = typeof variable.type === "string" ? variable.type : "text";
+    const type = rawType === "textarea" || rawType === "multiline"
+      ? rawType
+      : rawType === "number" || rawType === "boolean" || rawType === "select"
+        ? rawType
+        : "text";
+    return [{ key, label, type, required: variable.required === true, options }];
+  });
+}
+
+function validateFieldsForIntakeStage(stage: typeof pipelineStages.$inferSelect, fields: Record<string, unknown>) {
+  for (const field of intakeFieldsForStage(stage)) {
+    const value = fields[field.key];
+    if (field.required && isMissingRequiredField(value)) {
+      throw unprocessable(`${field.label} is required`, {
+        code: "required_field",
+        fieldKey: field.key,
+        label: field.label,
+      });
+    }
+    if (isMissingRequiredField(value)) continue;
+    if (field.type === "select" && field.options.length > 0 && !field.options.includes(String(value))) {
+      throw unprocessable(`${field.label} must use one of the available choices`, {
+        code: "invalid_select_value",
+        fieldKey: field.key,
+        label: field.label,
+      });
+    }
+    if (field.type === "number" && (typeof value !== "number" || !Number.isFinite(value))) {
+      throw unprocessable(`${field.label} must be a number`, {
+        code: "invalid_number_value",
+        fieldKey: field.key,
+        label: field.label,
+      });
+    }
+    if (field.type === "boolean" && typeof value !== "boolean") {
+      throw unprocessable(`${field.label} must be true or false`, {
+        code: "invalid_boolean_value",
+        fieldKey: field.key,
+        label: field.label,
+      });
+    }
+  }
+}
+
 function buildCaseDeepLink(input: { pipelineId: string; caseId: string }) {
   return `/PAP/pipelines/${input.pipelineId}/cases/${input.caseId}`;
 }
@@ -577,6 +747,7 @@ function buildPipelineStageEntryPreamble(input: {
   pipeline: typeof pipelines.$inferSelect;
   case: typeof pipelineCases.$inferSelect;
   stage: typeof pipelineStages.$inferSelect;
+  breakdownMechanics?: string | null;
   triggeringEventId?: string | null;
 }) {
   const contextPack = buildPipelineCaseContextPack(input);
@@ -596,6 +767,7 @@ function buildPipelineStageEntryPreamble(input: {
     "Create all intended child cases before moving the parent forward. Use deterministic requestKey values so retries converge instead of duplicating children.",
     "",
     "Pipeline variables available to the routine include {{case_id}}, {{case_key}}, {{case_title}}, {{case_version}}, {{pipeline_id}}, {{pipeline_key}}, {{stage_key}}, and each case field by its field key.",
+    input.breakdownMechanics,
     input.triggeringEventId ? `Triggering event: ${input.triggeringEventId}` : null,
     "",
     "```json",
@@ -900,9 +1072,11 @@ async function assertStageTransitionGates(
   db: PipelineDb,
   current: typeof pipelineCases.$inferSelect,
   fromStage: typeof pipelineStages.$inferSelect,
+  options: { skipChildrenTerminalGate?: boolean } = {},
 ) {
   const config = normalizeStageConfig(fromStage.kind, stageConfig(fromStage));
-  if (config.requireChildrenTerminal === true) {
+  const gate = childrenGateConfig(config);
+  if (gate.requireChildrenTerminal && options.skipChildrenTerminalGate !== true) {
     const expectedChildren = expectedChildrenFromFields(current.fields);
     if (expectedChildren !== null && expectedChildren !== current.childCount) {
       throw conflict("Pipeline expected child count does not match created child cases", {
@@ -1296,6 +1470,115 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
     await assertRoutineInCompany(companyId, onEnter.routineId);
   }
 
+  async function loadBreakdownTarget(
+    dbOrTx: PipelineDb,
+    companyId: string,
+    config: PipelineBreakdownConfig,
+  ) {
+    const targetPipeline = await getPipelineOrThrow(dbOrTx, companyId, config.targetPipelineId);
+    const targetStage = await getStageByKeyOrThrow(dbOrTx, targetPipeline.id, config.targetStageKey);
+    return { targetPipeline, targetStage };
+  }
+
+  function inheritedBreakdownFields(
+    parent: typeof pipelineCases.$inferSelect,
+    config: PipelineBreakdownConfig,
+  ) {
+    const source = parent.fields && typeof parent.fields === "object" && !Array.isArray(parent.fields)
+      ? parent.fields as Record<string, unknown>
+      : {};
+    const inherited: Record<string, unknown> = {};
+    for (const key of config.inheritFields) {
+      if (Object.prototype.hasOwnProperty.call(source, key)) inherited[key] = source[key];
+    }
+    return inherited;
+  }
+
+  async function buildBreakdownMechanicsPrompt(
+    dbOrTx: PipelineDb,
+    input: {
+      companyId: string;
+      caseId: string;
+      config: PipelineBreakdownConfig;
+    },
+  ) {
+    const { targetPipeline, targetStage } = await loadBreakdownTarget(dbOrTx, input.companyId, input.config);
+    const schema = intakeFieldsForStage(targetStage).map((field) => ({
+      key: field.key,
+      label: field.label,
+      type: field.type,
+      required: field.required,
+      options: field.options,
+    }));
+    return [
+      "## Paperclip Breakdown Mechanics",
+      "",
+      `When the work should be split into ${input.config.pieceNoun}s, call POST /api/cases/${input.caseId}/breakdown.`,
+      "",
+      "Send this JSON body:",
+      "",
+      "```json",
+      JSON.stringify({
+        items: [
+          {
+            key: "stable-piece-key",
+            title: `${input.config.pieceNoun} title`,
+            summary: `${input.config.pieceNoun} summary`,
+            fields: Object.fromEntries(schema.map((field) => [field.key, field.required ? "<required>" : "<optional>"])),
+          },
+        ],
+      }, null, 2),
+      "```",
+      "",
+      `Paperclip creates each ${input.config.pieceNoun} in "${targetPipeline.name}" at "${targetStage.name}", sets parentCaseId and requestKey, and copies inherited fields automatically.`,
+      input.config.advanceTo ? `After the call succeeds, Paperclip moves this item to "${input.config.advanceTo}".` : null,
+      "",
+      "Target item fields:",
+      "",
+      ...schema.map((field) => `- ${field.key}: ${field.label}; type ${field.type}; ${field.required ? "required" : "optional"}${field.options.length ? `; choices ${field.options.join(", ")}` : ""}`),
+    ].filter((line): line is string => line !== null).join("\n");
+  }
+
+  async function latestCompletedBreakdownConfig(
+    dbOrTx: PipelineDb,
+    companyId: string,
+    caseId: string,
+  ): Promise<PipelineBreakdownConfig | null> {
+    const event = await dbOrTx
+      .select()
+      .from(pipelineCaseEvents)
+      .where(and(
+        eq(pipelineCaseEvents.companyId, companyId),
+        eq(pipelineCaseEvents.caseId, caseId),
+        eq(pipelineCaseEvents.type, "updated"),
+        sql`${pipelineCaseEvents.payload}->>'kind' = 'breakdown_created'`,
+      ))
+      .orderBy(desc(pipelineCaseEvents.createdAt), desc(pipelineCaseEvents.id))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    const payload = event?.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+      ? event.payload as Record<string, unknown>
+      : null;
+    if (!payload) return null;
+    const config = payload.config && typeof payload.config === "object" && !Array.isArray(payload.config)
+      ? payload.config as Record<string, unknown>
+      : payload;
+    const targetPipelineId = typeof config.targetPipelineId === "string" ? config.targetPipelineId : null;
+    const targetStageKey = typeof config.targetStageKey === "string" ? config.targetStageKey : null;
+    if (!targetPipelineId || !targetStageKey) return null;
+    return {
+      targetPipelineId,
+      targetStageKey,
+      pieceNoun: typeof config.pieceNoun === "string" && config.pieceNoun.trim() ? config.pieceNoun.trim() : "piece",
+      inheritFields: readStringList(config.inheritFields, "Breakdown inheritFields"),
+      advanceTo: null,
+      waitForPieces: config.waitForPieces === true,
+      whenFinishedMoveTo: typeof config.whenFinishedMoveTo === "string" && config.whenFinishedMoveTo.trim()
+        ? config.whenFinishedMoveTo.trim()
+        : null,
+    };
+  }
+
   async function appendPipelineAutomationRoutineRevision(
     dbOrTx: PipelineDb,
     routine: typeof routines.$inferSelect,
@@ -1561,6 +1844,14 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       const routine = await assertRoutineInCompany(execution.companyId, execution.routineId);
       const contextPack = buildPipelineCaseContextPack(detail);
       const variables = buildPipelineCaseVariables(detail);
+      const breakdownConfig = readBreakdownConfig(stageConfig(detail.stage));
+      const breakdownMechanics = breakdownConfig
+        ? await buildBreakdownMechanicsPrompt(db, {
+            companyId: execution.companyId,
+            caseId: execution.caseId,
+            config: breakdownConfig,
+          })
+        : null;
       const run = await routinesSvc.runPipelineStageEntryRoutine(execution.routineId, {
         source: "api",
         assigneeAgentId: routine.assigneeAgentId,
@@ -1576,6 +1867,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         variables,
         descriptionPreamble: buildPipelineStageEntryPreamble({
           ...detail,
+          breakdownMechanics,
           triggeringEventId: execution.triggeringEventId,
         }),
         descriptionAppendix: buildPipelineCaseContextMarkdown({
@@ -1763,6 +2055,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       force?: boolean;
       automationLedgers?: Array<typeof pipelineAutomationExecutions.$inferSelect>;
       autoAdvanceVisitedStageIds?: Set<string>;
+      skipChildrenTerminalGate?: boolean;
     },
   ) {
     if (input.transitionClass === "auto" && input.actor.type !== "system") {
@@ -1781,7 +2074,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
     assertStageEnabled(toStage, "transition");
     if (fromStage.id !== toStage.id) {
       assertActorCanApproveStageExit(fromStage, input.actor);
-      await assertStageTransitionGates(tx, current, fromStage);
+      await assertStageTransitionGates(tx, current, fromStage, { skipChildrenTerminalGate: input.skipChildrenTerminalGate });
       await assertLatestReviewApprovalStillCurrent(tx, current, fromStage, toStage);
     }
     const toConfig = stageConfig(toStage);
@@ -1913,12 +2206,13 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       visitedStageIds?: Set<string>;
     },
   ) {
-    const toStageKey = stageConfig(input.stage).autoAdvanceOnChildrenTerminal;
-    if (typeof toStageKey !== "string" || !toStageKey) return;
+    const gate = childrenGateConfig(stageConfig(input.stage));
+    const toStageKey = gate.autoAdvanceOnChildrenTerminal;
+    if (!toStageKey) return;
     const visited = input.visitedStageIds ?? new Set<string>();
     if (visited.has(input.stage.id)) return;
     const rollup = await computeCaseRollup(tx, input.companyId, input.caseRow.id);
-    if (!rollup.complete || rollup.total === 0) return;
+    if (!rollup.complete || (rollup.total === 0 && !gate.explicitZeroChildrenPass)) return;
     const toStage = await getStageByKeyOrThrow(tx, input.caseRow.pipelineId, toStageKey);
     if (toStage.id === input.stage.id) return;
     visited.add(input.stage.id);
@@ -1951,7 +2245,8 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
     const ancestors = await getAncestorCases(tx, companyId, parentCaseId);
     for (const ancestor of ancestors) {
       const rollup = await computeCaseRollup(tx, companyId, ancestor.case.id);
-      if (!rollup.complete || rollup.total === 0 || await hasCaseEvent(tx, ancestor.case.id, "children_terminal")) {
+      const gate = childrenGateConfig(stageConfig(ancestor.stage));
+      if (!rollup.complete || (rollup.total === 0 && !gate.explicitZeroChildrenPass) || await hasCaseEvent(tx, ancestor.case.id, "children_terminal")) {
         continue;
       }
       await writeCaseEvent(tx, {
@@ -1968,8 +2263,8 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         body: `All child cases for pipeline case "${ancestor.case.title}" are terminal. Rollup: ${rollup.done} done, ${rollup.cancelled} cancelled, ${rollup.open} open.`,
       });
 
-      const toStageKey = stageConfig(ancestor.stage).autoAdvanceOnChildrenTerminal;
-      if (typeof toStageKey !== "string" || !toStageKey || isTerminalKind(ancestor.case.terminalKind)) {
+      const toStageKey = gate.autoAdvanceOnChildrenTerminal;
+      if (!toStageKey || isTerminalKind(ancestor.case.terminalKind)) {
         continue;
       }
       const toStage = await getStageByKeyOrThrow(tx, ancestor.case.pipelineId, toStageKey);
@@ -2576,6 +2871,109 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       });
     },
 
+    async breakdownCase(input: {
+      companyId: string;
+      caseId: string;
+      items: Array<{
+        key: string;
+        title: string;
+        summary?: string | null;
+        fields?: Record<string, unknown>;
+      }>;
+      actor: PipelineActor;
+    }) {
+      if (input.items.length > MAX_BATCH_INGEST) {
+        throw unprocessable("Breakdown supports at most 200 items", { code: "validation" });
+      }
+      const detail = await getCaseWithStageOrThrow(db, input.companyId, input.caseId);
+      const currentStageConfig = readBreakdownConfig(stageConfig(detail.stage));
+      const config = currentStageConfig ?? await latestCompletedBreakdownConfig(db, input.companyId, input.caseId);
+      if (!config) {
+        throw unprocessable("This pipeline stage is not configured for breakdown", { code: "breakdown_not_configured" });
+      }
+      const replayingCompletedBreakdown = currentStageConfig === null;
+      const { targetPipeline, targetStage } = await loadBreakdownTarget(db, input.companyId, config);
+      assertStageEnabled(targetStage, "breakdown");
+      const seenKeys = new Set<string>();
+      const inheritedFields = inheritedBreakdownFields(detail.case, config);
+      const items = input.items.map((item) => {
+        const key = item.key.trim();
+        if (!key) throw unprocessable("Breakdown item key is required", { code: "validation" });
+        if (key.length > 200) throw unprocessable("Breakdown item key must be at most 200 characters", { code: "validation" });
+        if (seenKeys.has(key)) throw unprocessable("Breakdown item keys must be unique", { code: "duplicate_breakdown_key", itemKey: key });
+        seenKeys.add(key);
+        const fields = { ...inheritedFields, ...(item.fields ?? {}) };
+        assertJsonSize(fields, "fields");
+        validateFieldsForIntakeStage(targetStage, fields);
+        return {
+          title: item.title,
+          summary: item.summary ?? null,
+          fields,
+          stageKey: config.targetStageKey,
+          parentCaseId: detail.case.id,
+          requestKey: `${config.pieceNoun}:${key}`,
+        };
+      });
+
+      const results = await service.ingestCases({
+        companyId: input.companyId,
+        pipelineId: targetPipeline.id,
+        items,
+        actor: input.actor,
+      });
+      const failed = results.find((result) => !result.ok);
+      if (failed && !failed.ok) {
+        const status = typeof failed.error.status === "number" ? failed.error.status : 422;
+        const message = typeof failed.error.message === "string" ? failed.error.message : "Breakdown item failed";
+        throw new HttpError(status, message, failed.error.details);
+      }
+
+      let parent = detail.case;
+      if (!replayingCompletedBreakdown && config.advanceTo) {
+        const transitioned = await service.transitionCase({
+          companyId: input.companyId,
+          caseId: detail.case.id,
+          toStageKey: config.advanceTo,
+          expectedVersion: detail.case.version,
+          actor: input.actor,
+          reason: "breakdown",
+          skipChildrenTerminalGate: true,
+        });
+        parent = transitioned.case;
+      } else if (!replayingCompletedBreakdown && items.length === 0 && config.waitForPieces && config.whenFinishedMoveTo) {
+        await db.transaction(async (tx) => {
+          await handleChildrenTerminal(tx, input.companyId, detail.case.id);
+        });
+        parent = await getCaseOrThrow(db, input.companyId, detail.case.id);
+      }
+
+      if (!replayingCompletedBreakdown) {
+        await writeCaseEvent(db, {
+          companyId: input.companyId,
+          caseId: detail.case.id,
+          type: "updated",
+          actor: input.actor,
+          payload: {
+            kind: "breakdown_created",
+            targetPipelineId: targetPipeline.id,
+            targetStageKey: targetStage.key,
+            pieceNoun: config.pieceNoun,
+            itemCount: items.length,
+            requestKeys: items.map((item) => item.requestKey),
+            advanceTo: config.advanceTo,
+            config,
+          },
+        });
+      }
+
+      return {
+        parentCase: parent,
+        targetPipeline: { id: targetPipeline.id, key: targetPipeline.key, name: targetPipeline.name },
+        targetStage: { id: targetStage.id, key: targetStage.key, name: targetStage.name },
+        items: results,
+      };
+    },
+
     async patchCaseContent(input: {
       companyId: string;
       caseId: string;
@@ -2713,6 +3111,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       suggestionId?: string;
       reason?: string | null;
       force?: boolean;
+      skipChildrenTerminalGate?: boolean;
     }) {
       const automationLedgers: Array<typeof pipelineAutomationExecutions.$inferSelect> = [];
       const result = await db.transaction((tx) => transitionCaseInTransaction(tx, { ...input, automationLedgers }));

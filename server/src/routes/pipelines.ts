@@ -123,6 +123,14 @@ const replaceTransitionsSchema = z.object({
   enforceTransitions: z.boolean().optional(),
 });
 const batchIngestSchema = z.object({ items: z.array(ingestCaseSchema).max(200) });
+const breakdownCaseSchema = z.object({
+  items: z.array(z.object({
+    key: z.string().trim().min(1).max(200),
+    title: z.string().trim().min(1).max(500),
+    summary: z.string().max(8_000).nullable().optional(),
+    fields: jsonObjectSchema.optional(),
+  })).max(200),
+});
 const claimCaseSchema = z.object({ leaseSeconds: z.number().int().positive().max(86_400).optional() });
 const releaseCaseSchema = z.object({
   leaseToken: z.string().uuid().nullable().optional(),
@@ -740,10 +748,17 @@ export function pipelineRoutes(db: Db, options: Parameters<typeof pipelineServic
       db.select({ id: pipelines.id, name: pipelines.name })
         .from(pipelines)
         .where(eq(pipelines.companyId, companyId)),
-      db.select({ pipelineId: pipelineStages.pipelineId, key: pipelineStages.key, name: pipelineStages.name })
+      db.select({
+        pipelineId: pipelineStages.pipelineId,
+        key: pipelineStages.key,
+        name: pipelineStages.name,
+        kind: pipelineStages.kind,
+        config: pipelineStages.config,
+      })
         .from(pipelineStages)
         .innerJoin(pipelines, eq(pipelineStages.pipelineId, pipelines.id))
-        .where(eq(pipelines.companyId, companyId)),
+        .where(eq(pipelines.companyId, companyId))
+        .orderBy(asc(pipelineStages.position), asc(pipelineStages.createdAt)),
       db.select({
         caseId: pipelineCases.id,
         caseTitle: pipelineCases.title,
@@ -790,13 +805,18 @@ export function pipelineRoutes(db: Db, options: Parameters<typeof pipelineServic
     const agentsById: Record<string, { id: string; name: string | null; status: string }> = {};
     for (const agent of companyAgents) agentsById[agent.id] = agent;
 
-    const stagesByPipelineId = new Map<string, Array<{ key: string; name: string }>>();
+    const stagesByPipelineId = new Map<string, Array<{ key: string; name: string; kind: string; config: Record<string, unknown> | null }>>();
     for (const stage of companyStages) {
       const list = stagesByPipelineId.get(stage.pipelineId) ?? [];
-      list.push({ key: stage.key, name: stage.name });
+      list.push({
+        key: stage.key,
+        name: stage.name,
+        kind: stage.kind,
+        config: (stage.config ?? null) as Record<string, unknown> | null,
+      });
       stagesByPipelineId.set(stage.pipelineId, list);
     }
-    const pipelinesById: Record<string, { id: string; name: string; stages: Array<{ key: string; name: string }> }> = {};
+    const pipelinesById: Record<string, { id: string; name: string; stages: Array<{ key: string; name: string; kind: string; config: Record<string, unknown> | null }> }> = {};
     for (const p of companyPipelines) {
       pipelinesById[p.id] = { id: p.id, name: p.name, stages: stagesByPipelineId.get(p.id) ?? [] };
     }
@@ -1134,6 +1154,13 @@ export function pipelineRoutes(db: Db, options: Parameters<typeof pipelineServic
     res.json(await svc.ingestCases({ companyId, pipelineId, items: req.body.items, actor }));
   });
 
+  router.post("/cases/:caseId/breakdown", validate(breakdownCaseSchema), async (req, res) => {
+    const caseId = req.params.caseId as string;
+    const companyId = await assertCaseAccess(db, req, caseId);
+    const actor = actorForMutation(req);
+    res.json(await svc.breakdownCase({ companyId, caseId, items: req.body.items, actor }));
+  });
+
   router.get("/pipelines/:pipelineId/cases", async (req, res) => {
     const pipelineId = req.params.pipelineId as string;
     const companyId = await assertPipelineAccess(db, req, pipelineId);
@@ -1467,6 +1494,7 @@ export function pipelineRoutes(db: Db, options: Parameters<typeof pipelineServic
       allowedTransitions: detail.allowedNextStages,
       linkedIssues: detail.links,
       blockers: detail.blockers,
+      childOutcomes: await getChildOutcomeSummaries(db, companyId, caseId),
       events: [...events.items].reverse(),
     });
   });
@@ -1571,4 +1599,52 @@ function buildCaseContextMarkdown(detail: Awaited<ReturnType<typeof getCaseDetai
     }, null, 2),
     "```",
   ].join("\n");
+}
+
+async function getChildOutcomeSummaries(db: Db, companyId: string, caseId: string) {
+  const children = await db
+    .select({ case: pipelineCases, stage: pipelineStages, pipeline: pipelines })
+    .from(pipelineCases)
+    .innerJoin(pipelineStages, eq(pipelineCases.stageId, pipelineStages.id))
+    .innerJoin(pipelines, eq(pipelineCases.pipelineId, pipelines.id))
+    .where(and(eq(pipelineCases.companyId, companyId), eq(pipelineCases.parentCaseId, caseId)))
+    .orderBy(asc(pipelineCases.createdAt));
+  if (children.length === 0) return [];
+
+  const childIds = children.map((row) => row.case.id);
+  const reviewEvents = await db
+    .select()
+    .from(pipelineCaseEvents)
+    .where(and(
+      eq(pipelineCaseEvents.companyId, companyId),
+      inArray(pipelineCaseEvents.caseId, childIds),
+      eq(pipelineCaseEvents.type, "review_decided"),
+    ))
+    .orderBy(desc(pipelineCaseEvents.createdAt), desc(pipelineCaseEvents.id));
+  const latestReviewByCaseId = new Map<string, typeof pipelineCaseEvents.$inferSelect>();
+  for (const event of reviewEvents) {
+    if (!latestReviewByCaseId.has(event.caseId)) latestReviewByCaseId.set(event.caseId, event);
+  }
+
+  return children.map((row) => {
+    const review = latestReviewByCaseId.get(row.case.id);
+    const reviewPayload = review?.payload && typeof review.payload === "object" && !Array.isArray(review.payload)
+      ? review.payload as Record<string, unknown>
+      : {};
+    const decision = typeof reviewPayload.decision === "string" ? reviewPayload.decision : null;
+    const reason = typeof reviewPayload.reason === "string" ? reviewPayload.reason : null;
+    return {
+      id: row.case.id,
+      caseKey: row.case.caseKey,
+      title: row.case.title,
+      href: `/pipelines/${row.pipeline.id}/items/${row.case.id}`,
+      pipeline: { id: row.pipeline.id, key: row.pipeline.key, name: row.pipeline.name },
+      stage: { id: row.stage.id, key: row.stage.key, name: row.stage.name, kind: row.stage.kind },
+      status: row.case.terminalKind ? "terminal" : "open",
+      terminalKind: row.case.terminalKind,
+      approved: decision === "approve" ? true : row.case.terminalKind === "done" ? true : null,
+      rejected: decision === "reject" ? true : row.case.terminalKind === "cancelled" ? true : null,
+      reason,
+    };
+  });
 }

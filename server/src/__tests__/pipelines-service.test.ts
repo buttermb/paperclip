@@ -1387,6 +1387,155 @@ describeEmbeddedPostgres("pipelineService", () => {
     });
   });
 
+  it("breaks a case into target pieces with derived request keys, inherited fields, validation, and retry convergence", async () => {
+    const company = await seedCompany();
+    const target = await svc.createPipeline({
+      companyId: company.id,
+      key: "features",
+      name: "Features",
+      actor: userActor,
+      stages: [
+        {
+          key: "intake",
+          name: "Intake",
+          kind: "open",
+          config: {
+            variables: [
+              { name: "release", label: "Release", type: "text", required: true },
+              { name: "risk", label: "Risk", type: "select", options: ["low", "high"], required: true },
+            ],
+          },
+        },
+        { key: "done", name: "Done", kind: "done" },
+        { key: "cancelled", name: "Cancelled", kind: "cancelled" },
+      ],
+    });
+    const source = await svc.createPipeline({
+      companyId: company.id,
+      key: "release",
+      name: "Release",
+      actor: userActor,
+      stages: [
+        {
+          key: "planning",
+          name: "Planning",
+          kind: "open",
+          config: {
+            breakdown: {
+              targetPipelineId: target.id,
+              targetStageKey: "intake",
+              pieceNoun: "feature",
+              inheritFields: ["release"],
+              advanceTo: "waiting",
+              waitForPieces: true,
+              whenFinishedMoveTo: "done",
+            },
+          },
+        },
+        { key: "waiting", name: "Waiting", kind: "working", config: { requireChildrenTerminal: true, autoAdvanceOnChildrenTerminal: "done" } },
+        { key: "done", name: "Done", kind: "done" },
+        { key: "cancelled", name: "Cancelled", kind: "cancelled" },
+      ],
+    });
+    const parent = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: source.id,
+      caseKey: "release-1",
+      title: "Release 1",
+      fields: { release: "1.0" },
+      actor: userActor,
+    });
+
+    await expect(svc.breakdownCase({
+      companyId: company.id,
+      caseId: parent.case.id,
+      items: [{ key: "bad", title: "Bad", fields: { risk: "medium" } }],
+      actor: userActor,
+    })).rejects.toMatchObject({ status: 422, details: { code: "invalid_select_value", fieldKey: "risk" } });
+
+    const first = await svc.breakdownCase({
+      companyId: company.id,
+      caseId: parent.case.id,
+      items: [{ key: "api", title: "API work", fields: { risk: "high" } }],
+      actor: userActor,
+    });
+    expect(first.items[0]).toMatchObject({ ok: true, created: true });
+    const piece = first.items[0]!.ok ? first.items[0]!.case : null;
+    expect(piece).toMatchObject({
+      parentCaseId: parent.case.id,
+      requestKey: "feature:api",
+      fields: { release: "1.0", risk: "high" },
+    });
+    const [freshParent] = await db.select().from(pipelineCases).where(eq(pipelineCases.id, parent.case.id));
+    expect(freshParent!.stageId).toBe(source.stages.find((stage) => stage.key === "waiting")!.id);
+
+    const retry = await svc.breakdownCase({
+      companyId: company.id,
+      caseId: parent.case.id,
+      items: [{ key: "api", title: "API work", fields: { risk: "high" } }],
+      actor: userActor,
+    });
+    expect(retry.items[0]).toMatchObject({ ok: true, created: false });
+    const [afterRetry] = await db.select().from(pipelineCases).where(eq(pipelineCases.id, parent.case.id));
+    expect(afterRetry!.childCount).toBe(1);
+  });
+
+  it("lets an explicit zero-piece breakdown pass the children gate and auto-advance", async () => {
+    const company = await seedCompany();
+    const target = await svc.createPipeline({ companyId: company.id, key: "empty-target", name: "Empty target", actor: userActor });
+    const source = await svc.createPipeline({
+      companyId: company.id,
+      key: "empty-breakdown",
+      name: "Empty breakdown",
+      actor: userActor,
+      stages: [
+        {
+          key: "planning",
+          name: "Planning",
+          kind: "open",
+          config: {
+            breakdown: {
+              targetPipelineId: target.id,
+              targetStageKey: "intake",
+              pieceNoun: "piece",
+              advanceTo: "waiting",
+              waitForPieces: true,
+              whenFinishedMoveTo: "done",
+            },
+          },
+        },
+        {
+          key: "waiting",
+          name: "Waiting",
+          kind: "working",
+          config: {
+            breakdown: {
+              targetPipelineId: target.id,
+              targetStageKey: "intake",
+              waitForPieces: true,
+              whenFinishedMoveTo: "done",
+            },
+          },
+        },
+        { key: "done", name: "Done", kind: "done" },
+        { key: "cancelled", name: "Cancelled", kind: "cancelled" },
+      ],
+    });
+    const parent = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: source.id,
+      caseKey: "empty",
+      title: "Empty",
+      actor: userActor,
+    });
+
+    await svc.breakdownCase({ companyId: company.id, caseId: parent.case.id, items: [], actor: userActor });
+
+    const [freshParent] = await db.select().from(pipelineCases).where(eq(pipelineCases.id, parent.case.id));
+    expect(freshParent!.terminalKind).toBe("done");
+    expect(freshParent!.childCount).toBe(0);
+  });
+
   it("does not auto-advance on stage entry when the case has no children", async () => {
     const company = await seedCompany();
     const pipeline = await svc.createPipeline({

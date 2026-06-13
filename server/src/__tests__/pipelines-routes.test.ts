@@ -491,6 +491,92 @@ describeEmbeddedPostgres("pipeline routes", () => {
     ]);
   });
 
+  it("breaks a case into pieces and exposes child outcomes in the parent context pack", async () => {
+    const company = await seedCompany();
+    const http = request(app(boardActor));
+    const target = await http
+      .post(`/api/companies/${company.id}/pipelines`)
+      .send({
+        key: "route-pieces",
+        name: "Route Pieces",
+        stages: [
+          {
+            key: "intake",
+            name: "Intake",
+            kind: "open",
+            position: 100,
+            config: {
+              variables: [
+                { name: "release", label: "Release", type: "text", required: true },
+                { name: "risk", label: "Risk", type: "select", options: ["low", "high"], required: true },
+              ],
+            },
+          },
+          { key: "done", name: "Done", kind: "done", position: 900 },
+          { key: "cancelled", name: "Cancelled", kind: "cancelled", position: 1000 },
+        ],
+      })
+      .expect(201);
+    const source = await http
+      .post(`/api/companies/${company.id}/pipelines`)
+      .send({
+        key: "route-source",
+        name: "Route Source",
+        stages: [
+          {
+            key: "planning",
+            name: "Planning",
+            kind: "open",
+            position: 100,
+            config: {
+              breakdown: {
+                targetPipelineId: target.body.id,
+                targetStageKey: "intake",
+                pieceNoun: "piece",
+                inheritFields: ["release"],
+                advanceTo: "waiting",
+                waitForPieces: true,
+                whenFinishedMoveTo: "done",
+              },
+            },
+          },
+          { key: "waiting", name: "Waiting", kind: "working", position: 200, config: { requireChildrenTerminal: true, autoAdvanceOnChildrenTerminal: "done" } },
+          { key: "done", name: "Done", kind: "done", position: 900 },
+          { key: "cancelled", name: "Cancelled", kind: "cancelled", position: 1000 },
+        ],
+      })
+      .expect(201);
+    const parent = await http
+      .post(`/api/pipelines/${source.body.id}/cases`)
+      .send({ caseKey: "rel", title: "Release", fields: { release: "1.0" } })
+      .expect(201);
+
+    const breakdown = await http
+      .post(`/api/cases/${parent.body.case.id}/breakdown`)
+      .send({ items: [{ key: "docs", title: "Docs", fields: { risk: "low" } }] })
+      .expect(200);
+    expect(breakdown.body.items[0]).toMatchObject({ ok: true, created: true });
+    const childId = breakdown.body.items[0].case.id;
+    expect(breakdown.body.items[0].case).toMatchObject({
+      parentCaseId: parent.body.case.id,
+      requestKey: "piece:docs",
+      fields: { release: "1.0", risk: "low" },
+    });
+
+    await http.post(`/api/cases/${childId}/transition`).send({ toStageKey: "cancelled", expectedVersion: 1 }).expect(200);
+
+    const pack = await http.get(`/api/cases/${parent.body.case.id}/context-pack`).expect(200);
+    expect(pack.body.stage).toMatchObject({ key: "done", kind: "done" });
+    expect(pack.body.childOutcomes).toHaveLength(1);
+    expect(pack.body.childOutcomes[0]).toMatchObject({
+      id: childId,
+      title: "Docs",
+      status: "terminal",
+      terminalKind: "cancelled",
+      rejected: true,
+    });
+  });
+
   it("stamps and clears pipeline automation routine origins when stage wiring changes", async () => {
     const company = await seedCompany();
     const http = request(app(boardActor));

@@ -24,6 +24,24 @@ export const pipelineStageOnEnterSchema = z.object({
   id: z.string().trim().min(1).max(200).optional(),
 }).passthrough();
 
+export const pipelineStageBreakdownSchema = z.object({
+  targetPipelineId: z.string().uuid(),
+  targetStageKey: z.string().trim().min(1).max(120),
+  pieceNoun: z.string().trim().min(1).max(80).default("piece"),
+  inheritFields: z.array(routineVariableLikeNameSchema).max(100).default([]),
+  advanceTo: z.string().trim().min(1).max(120).optional(),
+  waitForPieces: z.boolean().optional().default(false),
+  whenFinishedMoveTo: z.string().trim().min(1).max(120).optional(),
+}).superRefine((value, ctx) => {
+  if (value.waitForPieces && !value.whenFinishedMoveTo) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["whenFinishedMoveTo"],
+      message: "Breakdown stages that wait for pieces need a destination stage",
+    });
+  }
+});
+
 export const pipelineStageVariableSchema = z.object({
   key: routineVariableLikeNameSchema,
   label: z.string().trim().max(120),
@@ -58,6 +76,7 @@ export const pipelineStageConfigSchema = z.object({
   reviewerKind: z.enum(["human", "any"]).optional(),
   whatHappensHere: z.string().trim().max(10_000).optional(),
   onEnter: pipelineStageOnEnterSchema.optional(),
+  breakdown: pipelineStageBreakdownSchema.optional(),
   approveToStageKey: z.string().trim().min(1).max(120).optional(),
   rejectToStageKey: z.string().trim().min(1).max(120).optional(),
   requestChangesToStageKey: z.string().trim().min(1).max(120).optional(),
@@ -81,5 +100,6 @@ export const pipelineStageConfigSchema = z.object({
 export type PipelineStageKind = z.infer<typeof pipelineStageKindSchema>;
 export type PipelineStageApprover = z.infer<typeof pipelineStageApproverSchema>;
 export type PipelineStageOnEnter = z.infer<typeof pipelineStageOnEnterSchema>;
+export type PipelineStageBreakdown = z.infer<typeof pipelineStageBreakdownSchema>;
 export type PipelineStageVariable = z.infer<typeof pipelineStageVariableSchema>;
 export type PipelineStageConfig = z.infer<typeof pipelineStageConfigSchema>;

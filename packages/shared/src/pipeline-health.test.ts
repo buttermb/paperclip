@@ -214,6 +214,75 @@ describe("computePipelineHealth", () => {
     expect(report.warnings).toEqual([]);
   });
 
+  it("uses breakdown config for first-class target health instead of prose-scanning stage instructions", () => {
+    const report = computePipelineHealth(
+      baseInput([
+        stage({
+          config: {
+            breakdown: {
+              targetPipelineId: "pipeline-2",
+              targetStageKey: "assets",
+              pieceNoun: "asset",
+              inheritFields: ["topic"],
+              waitForPieces: true,
+              whenFinishedMoveTo: "review",
+            },
+          },
+          instructionsBody: `Ignore a stale prose link to ${buildPipelineMentionHref("missing-pipeline")}.`,
+        }),
+      ], {
+        pipelinesById: {
+          "pipeline-2": {
+            id: "pipeline-2",
+            name: "Content Production",
+            stages: [{ key: "assets", name: "Assets", kind: "working", config: { variables: [{ name: "topic" }] } }],
+          },
+        },
+      }),
+    );
+    expect(report.warnings.map((warning) => warning.code)).not.toContain("missing_pipeline_reference");
+    expect(report.warnings).toEqual([]);
+  });
+
+  it("warns for missing or unsafe breakdown target configuration", () => {
+    const report = computePipelineHealth(
+      baseInput([
+        stage({
+          id: "missing",
+          config: { breakdown: { targetPipelineId: "gone", targetStageKey: "intake" } },
+        }),
+        stage({
+          id: "unsafe",
+          config: {
+            breakdown: {
+              targetPipelineId: "pipeline-2",
+              targetStageKey: "assets",
+              pieceNoun: "asset",
+              inheritFields: ["missing_field"],
+            },
+          },
+        }),
+      ], {
+        pipelinesById: {
+          "pipeline-2": {
+            id: "pipeline-2",
+            name: "Content Production",
+            stages: [
+              { key: "intake", name: "Intake", kind: "working", config: { variables: [] } },
+              { key: "assets", name: "Assets", kind: "review", config: { variables: [{ name: "topic" }] } },
+            ],
+          },
+        },
+      }),
+    );
+    expect(report.warnings.map((warning) => warning.code)).toEqual([
+      "breakdown_target_missing",
+      "breakdown_no_wait",
+      "breakdown_field_mismatch",
+      "breakdown_target_not_entry_safe",
+    ]);
+  });
+
   it("warns when a required variable has no default value on a stage that runs instructions", () => {
     const report = computePipelineHealth(
       baseInput([
