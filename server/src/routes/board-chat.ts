@@ -4,9 +4,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Db } from "@paperclipai/db";
-import type { DeploymentExposure, DeploymentMode } from "@paperclipai/shared";
+import type { DeploymentMode } from "@paperclipai/shared";
 import { instanceSettingsService, issueService } from "../services/index.js";
-import { assertCompanyAccess, assertInstanceAdmin, getActorInfo } from "./authz.js";
+import { assertCompanyAccess, getActorInfo } from "./authz.js";
 
 /**
  * Strip structured action signals (`%%ACTIONS%%{...}%%/ACTIONS%%`) from a
@@ -61,97 +61,10 @@ export function isConciergeReply(comment: {
 
 /** Max simultaneous `claude` subprocesses across all board-chat requests. */
 const MAX_CONCURRENT_BOARD_CHATS = 3;
-const BOARD_CHAT_ORIGIN_KIND = "board_chat";
-const LEGACY_BOARD_CHAT_TITLE = "Board Operations";
-const BOARD_CHAT_DESCRIPTION = "Standing issue for board concierge conversations and decision log";
-
-function deriveBoardChatIssueTitle(message: string): string {
-  const singleLine = message.replace(/\s+/g, " ").trim();
-  if (!singleLine) return "New chat";
-  if (singleLine.length <= 80) return singleLine;
-  return `${singleLine.slice(0, 77).trimEnd()}...`;
-}
-
-function isOpenBoardChatIssue(issue: { status?: string | null }) {
-  return issue.status !== "done" && issue.status !== "cancelled";
-}
-
-function isLegacyBoardChatIssue(issue: {
-  title?: string | null;
-  description?: string | null;
-  originKind?: string | null;
-  status?: string | null;
-  assigneeAgentId?: string | null;
-  assigneeUserId?: string | null;
-}) {
-  return (
-    issue.title === LEGACY_BOARD_CHAT_TITLE &&
-    issue.description === BOARD_CHAT_DESCRIPTION &&
-    (issue.originKind === undefined || issue.originKind === null || issue.originKind === "manual") &&
-    issue.assigneeAgentId === null &&
-    issue.assigneeUserId === null &&
-    isOpenBoardChatIssue(issue)
-  );
-}
-
-/**
- * Resolve the standing `board_chat` conversation issue for a company, creating
- * one (origin-tagged) if none is open. Shared by `/board/chat/stream` (the
- * legacy concierge relay) and `/board/chat/conversations` (the real-agent
- * Conference Room, PAP-11099): both need a backing issue the web client cannot
- * mint itself, since `createIssueBaseSchema` strips `originKind`.
- *
- * - `wantsNewConversation` skips reuse and always creates a fresh conversation
- *   (the room's "New chat" control).
- * - Otherwise reuse the most-recent open origin-tagged issue, then adopt and
- *   repair a legacy "Board Operations" issue, then create.
- * - `message`, when present, seeds a first-message title; absent (the room
- *   mints before the first message), it falls back to "New chat".
- */
-async function resolveOrCreateBoardChatIssue(
-  issueSvc: ReturnType<typeof issueService>,
-  companyId: string,
-  opts: { message?: string; wantsNewConversation?: boolean },
-): Promise<{ id: string }> {
-  if (!opts.wantsNewConversation) {
-    const boardChatIssues = await issueSvc.list(companyId, {
-      originKind: BOARD_CHAT_ORIGIN_KIND,
-      sortField: "updated",
-      sortDir: "desc",
-    });
-    const boardIssue = boardChatIssues.find(isOpenBoardChatIssue);
-    if (boardIssue) return boardIssue;
-
-    const legacyIssues = await issueSvc.list(companyId, {
-      q: LEGACY_BOARD_CHAT_TITLE,
-      sortField: "updated",
-      sortDir: "desc",
-    });
-    const legacyIssue = legacyIssues.find(isLegacyBoardChatIssue);
-    if (legacyIssue) {
-      try {
-        await issueSvc.update(legacyIssue.id, { originKind: BOARD_CHAT_ORIGIN_KIND });
-      } catch {
-        /* best-effort legacy repair; the selected issue still anchors this request */
-      }
-      return legacyIssue;
-    }
-  }
-
-  return issueSvc.create(companyId, {
-    title: opts.message ? deriveBoardChatIssueTitle(opts.message) : "New chat",
-    description: BOARD_CHAT_DESCRIPTION,
-    originKind: BOARD_CHAT_ORIGIN_KIND,
-    // `todo` rather than `in_progress`: this is an unassigned standing issue,
-    // and the service rejects in_progress issues without an assignee.
-    status: "todo",
-    priority: "medium",
-  });
-}
 
 export function boardChatRoutes(
   db: Db,
-  opts: { deploymentMode: DeploymentMode; deploymentExposure: DeploymentExposure },
+  opts: { deploymentMode: DeploymentMode },
 ) {
   const router = Router();
   let liveBoardChats = 0;
@@ -195,35 +108,29 @@ export function boardChatRoutes(
     }
 
     // The relay spawns the operator's local `claude` CLI with permissions
-    // skipped (it must run headless), so it is only safe for the machine
-    // operator: local_trusted loopback or authenticated/private instance-admin
-    // board sessions. Refuse authenticated/public rather than lending the
-    // server's shell to internet-reachable users.
-    const isSupportedDeployment =
-      opts.deploymentMode === "local_trusted" ||
-      (opts.deploymentMode === "authenticated" && opts.deploymentExposure === "private");
-    if (!isSupportedDeployment) {
+    // skipped (it must run headless), so it is only safe where the requester
+    // IS the machine operator: local_trusted is loopback-only single-operator
+    // by construction (see server/src/index.ts boot guards). Refuse everywhere
+    // else rather than lending the server's shell to remote users.
+    if (opts.deploymentMode !== "local_trusted") {
       res.status(403).json({
-        error: "Board chat is only available on local or private operator instances",
+        error: "Board chat is only available on local single-operator instances",
         code: "DEPLOYMENT_MODE_UNSUPPORTED",
       });
       return;
     }
 
-    const { companyId, message, taskId, newConversation } = req.body as {
+    const { companyId, message, taskId } = req.body as {
       companyId?: string;
       message?: string;
       taskId?: string;
-      newConversation?: boolean | string;
     };
-    const wantsNewConversation = newConversation === true || newConversation === "true";
 
     if (!companyId || !message) {
       res.status(400).json({ error: "companyId and message are required" });
       return;
     }
 
-    assertInstanceAdmin(req);
     // The body-supplied companyId must belong to the authenticated actor —
     // it scopes issue reads/writes below and is exported to the subprocess.
     assertCompanyAccess(req, companyId);
@@ -239,18 +146,33 @@ export function boardChatRoutes(
     }
 
     const issueSvc = issueService(db);
-    let issueId = wantsNewConversation ? undefined : taskId;
+    let issueId = taskId;
 
-    // Find or create the standing issue that anchors the board conversation +
-    // decision log. New records use the special origin; the title fallback
-    // below is intentionally narrow so unrelated "Board Operations" tasks are
-    // not silently pulled into Conference Room history.
+    // Find or create the standing "Board Operations" issue that anchors the
+    // board conversation + decision log.
     if (!issueId) {
-      const issue = await resolveOrCreateBoardChatIssue(issueSvc, companyId, {
-        message,
-        wantsNewConversation,
-      });
-      issueId = issue.id;
+      const companyIssues = await issueSvc.list(companyId, { q: "Board Operations" });
+      const boardIssue = companyIssues.find(
+        (i) =>
+          i.title === "Board Operations" &&
+          i.status !== "done" &&
+          i.status !== "cancelled",
+      );
+      if (boardIssue) {
+        issueId = boardIssue.id;
+      } else {
+        const created = await issueSvc.create(companyId, {
+          title: "Board Operations",
+          description:
+            "Standing issue for board concierge conversations and decision log",
+          // `todo` rather than `in_progress`: this is an unassigned standing
+          // issue, and the service rejects in_progress issues without an
+          // assignee.
+          status: "todo",
+          priority: "medium",
+        });
+        issueId = created.id;
+      }
     }
 
     const resolvedIssueId = issueId!;
@@ -474,44 +396,6 @@ export function boardChatRoutes(
     // Feed the prompt to the CLI via stdin.
     proc.stdin.write(prompt);
     proc.stdin.end();
-  });
-
-  // Mint (or resolve) the backing `board_chat` conversation issue WITHOUT
-  // spawning the concierge subprocess. The live Conference Room (PAP-11099
-  // Phase 3b) renders the real-agent `SelectedAgentChat` over this issue;
-  // the web client can't create it directly because `originKind` is stripped
-  // by the issue create schema. Gated like `/board/chat/stream` on the
-  // experimental flag + instance admin + company access — but with no
-  // deployment-mode restriction, since nothing is spawned here.
-  router.post("/board/chat/conversations", async (req, res) => {
-    const experimental = await instanceSettingsService(db).getExperimental();
-    if (experimental.enableConferenceRoomChat !== true) {
-      res.status(403).json({
-        error: "Conference Room Chat is not enabled",
-        code: "FEATURE_DISABLED",
-      });
-      return;
-    }
-
-    const { companyId, newConversation, message } = req.body as {
-      companyId?: string;
-      newConversation?: boolean | string;
-      message?: string;
-    };
-    if (!companyId) {
-      res.status(400).json({ error: "companyId is required" });
-      return;
-    }
-
-    assertInstanceAdmin(req);
-    assertCompanyAccess(req, companyId);
-
-    const wantsNewConversation = newConversation === true || newConversation === "true";
-    const issue = await resolveOrCreateBoardChatIssue(issueService(db), companyId, {
-      message,
-      wantsNewConversation,
-    });
-    res.status(200).json({ issue });
   });
 
   return router;

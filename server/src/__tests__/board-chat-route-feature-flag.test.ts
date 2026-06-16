@@ -7,7 +7,6 @@ const mockGetExperimental = vi.hoisted(() => vi.fn());
 const mockIssueService = vi.hoisted(() => ({
   list: vi.fn(),
   create: vi.fn(),
-  update: vi.fn(),
   addComment: vi.fn(),
   listComments: vi.fn(),
 }));
@@ -23,17 +22,13 @@ vi.mock("node:child_process", () => ({ spawn: mockSpawn }));
 vi.mock("../routes/authz.js", () => ({
   getActorInfo: () => ({ actorId: "user-1", agentId: null, runId: null }),
   assertCompanyAccess: () => {},
-  assertInstanceAdmin: () => {},
 }));
 
-async function createApp(
-  deploymentMode: "local_trusted" | "authenticated" = "local_trusted",
-  deploymentExposure: "private" | "public" = "private",
-) {
+async function createApp(deploymentMode: "local_trusted" | "authenticated" = "local_trusted") {
   const { boardChatRoutes } = await import("../routes/board-chat.js");
   const app = express();
   app.use(express.json());
-  app.use("/api", boardChatRoutes({} as any, { deploymentMode, deploymentExposure }));
+  app.use("/api", boardChatRoutes({} as any, { deploymentMode }));
   return app;
 }
 
@@ -60,9 +55,9 @@ describe("POST /api/board/chat/stream feature flag guard (PAP-137)", () => {
     expect(mockIssueService.create).not.toHaveBeenCalled();
   });
 
-  it("returns 403 DEPLOYMENT_MODE_UNSUPPORTED for authenticated public instances", async () => {
+  it("returns 403 DEPLOYMENT_MODE_UNSUPPORTED outside local_trusted even with the flag on", async () => {
     mockGetExperimental.mockResolvedValue({ enableConferenceRoomChat: true });
-    const app = await createApp("authenticated", "public");
+    const app = await createApp("authenticated");
 
     const res = await request(app)
       .post("/api/board/chat/stream")
@@ -73,7 +68,7 @@ describe("POST /api/board/chat/stream feature flag guard (PAP-137)", () => {
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
   });
 
-  it("lets local_trusted requests past the deployment guard when the flag is on", async () => {
+  it("lets requests past the guard when the flag is on (400 on missing body, not 403)", async () => {
     mockGetExperimental.mockResolvedValue({ enableConferenceRoomChat: true });
     const app = await createApp();
 
@@ -84,23 +79,9 @@ describe("POST /api/board/chat/stream feature flag guard (PAP-137)", () => {
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error: "companyId and message are required" });
   });
-
-  it("lets authenticated private requests past the deployment guard when the flag is on", async () => {
-    mockGetExperimental.mockResolvedValue({ enableConferenceRoomChat: true });
-    const app = await createApp("authenticated", "private");
-
-    const res = await request(app).post("/api/board/chat/stream").send({});
-
-    expect(res.status).toBe(400);
-    expect(res.body).toEqual({ error: "companyId and message are required" });
-  });
 });
 
 describe("board-chat client disconnect", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
   function makeFakeProc() {
     const proc = new EventEmitter() as any;
     proc.stdout = new EventEmitter();
@@ -117,7 +98,7 @@ describe("board-chat client disconnect", () => {
   it("kills the spawned subprocess when the client disconnects mid-stream", async () => {
     mockGetExperimental.mockResolvedValue({ enableConferenceRoomChat: true });
     mockIssueService.list.mockResolvedValue([
-      { id: "issue-1", title: "Quarterly hiring plan", originKind: "board_chat", status: "todo" },
+      { id: "issue-1", title: "Board Operations", status: "todo" },
     ]);
     mockIssueService.addComment.mockResolvedValue({ id: "comment-1" });
     mockIssueService.listComments.mockResolvedValue([]);
@@ -144,152 +125,6 @@ describe("board-chat client disconnect", () => {
     // Let the subprocess close handler run so the slot is released.
     fakeProc.exitCode = 143;
     fakeProc.emit("close", 143);
-    await pending;
-  });
-
-  it("tags newly created issues as board chat conversations with a first-message title", async () => {
-    mockGetExperimental.mockResolvedValue({ enableConferenceRoomChat: true });
-    mockIssueService.list.mockResolvedValue([]);
-    mockIssueService.create.mockResolvedValue({ id: "issue-new" });
-    mockIssueService.addComment.mockResolvedValue({ id: "comment-1" });
-    mockIssueService.listComments.mockResolvedValue([]);
-    const fakeProc = makeFakeProc();
-    mockSpawn.mockReturnValue(fakeProc);
-    const app = await createApp();
-
-    const req = request(app)
-      .post("/api/board/chat/stream")
-      .set("Content-Type", "application/json")
-      .send(JSON.stringify({ companyId: "company-1", message: "hello" }));
-    const pending = req.then(
-      () => undefined,
-      () => undefined,
-    );
-
-    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
-    fakeProc.exitCode = 0;
-    fakeProc.emit("close", 0);
-
-    expect(mockIssueService.create).toHaveBeenCalledWith("company-1", expect.objectContaining({
-      title: "hello",
-      originKind: "board_chat",
-    }));
-    expect(mockIssueService.addComment).toHaveBeenCalledWith(
-      "issue-new",
-      "hello",
-      expect.any(Object),
-    );
-    req.abort();
-    await pending;
-  });
-
-  it("reuses board chat issues by origin before falling back to legacy route-owned Board Operations issues", async () => {
-    mockGetExperimental.mockResolvedValue({ enableConferenceRoomChat: true });
-    mockIssueService.list
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([
-        {
-          id: "issue-legacy",
-          title: "Board Operations",
-          description: "Standing issue for board concierge conversations and decision log",
-          originKind: "manual",
-          status: "todo",
-          assigneeAgentId: null,
-          assigneeUserId: null,
-        },
-      ]);
-    mockIssueService.update.mockResolvedValue({ id: "issue-legacy", originKind: "board_chat" });
-    mockIssueService.addComment.mockResolvedValue({ id: "comment-1" });
-    mockIssueService.listComments.mockResolvedValue([]);
-    const fakeProc = makeFakeProc();
-    mockSpawn.mockReturnValue(fakeProc);
-    const app = await createApp();
-
-    const req = request(app)
-      .post("/api/board/chat/stream")
-      .set("Content-Type", "application/json")
-      .send(JSON.stringify({ companyId: "company-1", message: "hello" }));
-    const pending = req.then(
-      () => undefined,
-      () => undefined,
-    );
-
-    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
-    fakeProc.exitCode = 0;
-    fakeProc.emit("close", 0);
-
-    expect(mockIssueService.list).toHaveBeenNthCalledWith(1, "company-1", expect.objectContaining({
-      originKind: "board_chat",
-    }));
-    expect(mockIssueService.list).toHaveBeenNthCalledWith(2, "company-1", expect.objectContaining({
-      q: "Board Operations",
-    }));
-    expect(mockIssueService.update).toHaveBeenCalledWith("issue-legacy", { originKind: "board_chat" });
-    expect(mockIssueService.create).not.toHaveBeenCalled();
-    expect(mockIssueService.addComment).toHaveBeenCalledWith(
-      "issue-legacy",
-      "hello",
-      expect.any(Object),
-    );
-    req.abort();
-    await pending;
-  });
-
-  it("does not repair or anchor assigned manual issues that only look like legacy board chat issues", async () => {
-    mockGetExperimental.mockResolvedValue({ enableConferenceRoomChat: true });
-    mockIssueService.list
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([
-        {
-          id: "issue-agent-assigned-manual",
-          title: "Board Operations",
-          description: "Standing issue for board concierge conversations and decision log",
-          originKind: "manual",
-          status: "todo",
-          assigneeAgentId: "agent-1",
-          assigneeUserId: null,
-        },
-        {
-          id: "issue-user-assigned-manual",
-          title: "Board Operations",
-          description: "Standing issue for board concierge conversations and decision log",
-          originKind: "manual",
-          status: "todo",
-          assigneeAgentId: null,
-          assigneeUserId: "user-2",
-        },
-      ]);
-    mockIssueService.create.mockResolvedValue({ id: "issue-new" });
-    mockIssueService.addComment.mockResolvedValue({ id: "comment-1" });
-    mockIssueService.listComments.mockResolvedValue([]);
-    const fakeProc = makeFakeProc();
-    mockSpawn.mockReturnValue(fakeProc);
-    const app = await createApp();
-
-    const req = request(app)
-      .post("/api/board/chat/stream")
-      .set("Content-Type", "application/json")
-      .send(JSON.stringify({ companyId: "company-1", message: "hello" }));
-    const pending = req.then(
-      () => undefined,
-      () => undefined,
-    );
-
-    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
-    fakeProc.exitCode = 0;
-    fakeProc.emit("close", 0);
-
-    expect(mockIssueService.update).not.toHaveBeenCalled();
-    expect(mockIssueService.create).toHaveBeenCalledWith("company-1", expect.objectContaining({
-      title: "hello",
-      originKind: "board_chat",
-    }));
-    expect(mockIssueService.addComment).toHaveBeenCalledWith(
-      "issue-new",
-      "hello",
-      expect.any(Object),
-    );
-    req.abort();
     await pending;
   });
 });

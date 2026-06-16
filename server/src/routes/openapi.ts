@@ -19,7 +19,6 @@ import {
   updateIssueSchema,
   createIssueLabelSchema,
   addIssueCommentSchema,
-  selectedAgentChatCommentSchema,
   checkoutIssueSchema,
   linkIssueApprovalSchema,
   createIssueWorkProductSchema,
@@ -619,7 +618,6 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/issues/{id}/children",
   "POST /api/issues/{id}/interactions",
   "POST /api/issues/{id}/comments",
-  "POST /api/issues/{id}/selected-agent-chat/comments",
   "POST /api/companies/{companyId}/issues/{issueId}/attachments",
   "POST /api/companies/{companyId}/projects",
   "POST /api/projects/{id}/workspaces",
@@ -1503,18 +1501,6 @@ registry.registerPath({
     body: jsonBody(addIssueCommentSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
-});
-
-registry.registerPath({
-  method: "post",
-  path: "/api/issues/{id}/selected-agent-chat/comments",
-  tags: ["issues"],
-  summary: "Add an issue-backed selected-agent chat comment",
-  request: {
-    params: z.object({ id: z.string() }),
-    body: jsonBody(selectedAgentChatCommentSchema),
-  },
-  responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 409: r.conflict, 422: r.unprocessable },
 });
 
 registry.registerPath({
@@ -2494,24 +2480,6 @@ registry.registerPath({
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
 });
 
-registry.registerPath({
-  method: "post",
-  path: "/api/board/chat/conversations",
-  tags: ["instance"],
-  summary:
-    "Resolve or mint the Conference Room board_chat conversation issue (requires enableConferenceRoomChat)",
-  request: {
-    body: jsonBody(
-      z.object({
-        companyId: z.string(),
-        newConversation: z.boolean().optional(),
-        message: z.string().optional(),
-      }),
-    ),
-  },
-  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
-});
-
 // ─── Access / invites / members ───────────────────────────────────────────────
 
 registry.registerPath({
@@ -2825,10 +2793,7 @@ registry.registerPath({
   path: "/api/issues/{issueId}/live-runs",
   tags: ["runs"],
   summary: "List live runs for an issue",
-  request: {
-    params: z.object({ issueId: z.string() }),
-    query: z.object({ targetAgentId: z.string().uuid().optional() }).optional(),
-  },
+  request: { params: z.object({ issueId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
 
@@ -2837,10 +2802,7 @@ registry.registerPath({
   path: "/api/issues/{issueId}/active-run",
   tags: ["runs"],
   summary: "Get active run for an issue",
-  request: {
-    params: z.object({ issueId: z.string() }),
-    query: z.object({ targetAgentId: z.string().uuid().optional() }).optional(),
-  },
+  request: { params: z.object({ issueId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
 
