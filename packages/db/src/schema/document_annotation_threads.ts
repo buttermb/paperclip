@@ -4,7 +4,8 @@ import type {
   DocumentAnnotationAnchorState,
   DocumentAnnotationThreadStatus,
 } from "@paperclipai/shared";
-import { index, integer, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { check, index, integer, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { agents } from "./agents.js";
 import { companies } from "./companies.js";
 import { documentRevisions } from "./document_revisions.js";
@@ -72,6 +73,10 @@ export const documentAnnotationThreads = pgTable(
     companyAnchorStateIdx: index("document_annotation_threads_company_anchor_state_idx").on(
       table.companyId,
       table.anchorState,
+    ),
+    exactlyOneOwnerChk: check(
+      "document_annotation_threads_exactly_one_owner_chk",
+      sql`num_nonnulls(${table.issueId}, ${table.routineId}) = 1`,
     ),
   }),
 );

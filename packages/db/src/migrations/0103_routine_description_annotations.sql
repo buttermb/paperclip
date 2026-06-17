@@ -62,6 +62,22 @@ DO $$ BEGIN
 	END IF;
 END $$;
 --> statement-breakpoint
+DO $$ BEGIN
+	IF NOT EXISTS (
+		SELECT 1 FROM "pg_constraint" WHERE "conname" = 'document_annotation_threads_exactly_one_owner_chk'
+	) THEN
+		ALTER TABLE "document_annotation_threads" ADD CONSTRAINT "document_annotation_threads_exactly_one_owner_chk" CHECK (num_nonnulls("issue_id", "routine_id") = 1);
+	END IF;
+END $$;
+--> statement-breakpoint
+DO $$ BEGIN
+	IF NOT EXISTS (
+		SELECT 1 FROM "pg_constraint" WHERE "conname" = 'document_annotation_comments_exactly_one_owner_chk'
+	) THEN
+		ALTER TABLE "document_annotation_comments" ADD CONSTRAINT "document_annotation_comments_exactly_one_owner_chk" CHECK (num_nonnulls("issue_id", "routine_id") = 1);
+	END IF;
+END $$;
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "document_annotation_threads_company_routine_status_idx" ON "document_annotation_threads" USING btree ("company_id","routine_id","status");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "document_annotation_comments_company_routine_created_at_idx" ON "document_annotation_comments" USING btree ("company_id","routine_id","created_at");
