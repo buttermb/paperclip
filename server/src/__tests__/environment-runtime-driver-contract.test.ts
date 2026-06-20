@@ -87,6 +87,7 @@ describeEmbeddedPostgres("environment runtime driver contract", () => {
   }) {
     const companyId = randomUUID();
     const agentId = randomUUID();
+    const environmentId = randomUUID();
     const runId = randomUUID();
     const now = new Date();
     let config = input.config;
@@ -140,10 +141,10 @@ describeEmbeddedPostgres("environment runtime driver contract", () => {
             where: (environment, { eq }) => eq(environment.driver, "local"),
           })
         : null;
-    const environmentId = existingLocal?.id ?? randomUUID();
+    const resolvedEnvironmentId = existingLocal?.id ?? environmentId;
     if (!existingLocal) {
       await db.insert(environments).values({
-        id: environmentId,
+        id: resolvedEnvironmentId,
         name: `${input.driver} contract`,
         driver: input.driver,
         status: "active",
@@ -169,7 +170,7 @@ describeEmbeddedPostgres("environment runtime driver contract", () => {
       issueId: null,
       runId,
       environment: {
-        id: environmentId,
+        id: resolvedEnvironmentId,
         companyId,
         name: `${input.driver} contract`,
         description: null,

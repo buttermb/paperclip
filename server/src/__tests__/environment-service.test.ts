@@ -303,6 +303,66 @@ describeEmbeddedPostgres("environmentService leases", () => {
     expect((rows[0]?.metadata as Record<string, unknown>)?.managedKubernetesSandbox).toBe(true);
   });
 
+  it("returns a conflict when creating a second environment with the same name", async () => {
+    await seedEnvironment();
+
+    await svc.create({
+      name: "Shared Fixture",
+      driver: "ssh",
+      status: "active",
+      config: {
+        host: "fixture.example.test",
+        port: 22,
+        username: "fixture",
+        remoteWorkspacePath: "/srv/paperclip",
+      },
+    });
+
+    await expect(svc.create({
+      name: "Shared Fixture",
+      driver: "sandbox",
+      status: "active",
+      config: {
+        provider: "fake-plugin",
+        image: "fake:test",
+        reuseLease: false,
+      },
+    })).rejects.toMatchObject({
+      status: 409,
+      message: 'An environment named "Shared Fixture" already exists for this instance.',
+    });
+  });
+
+  it("returns a conflict when renaming an environment to an existing name", async () => {
+    const { environmentId } = await seedEnvironment();
+    const otherEnvironmentId = randomUUID();
+    const now = new Date();
+
+    await db.insert(environments).values({
+      id: otherEnvironmentId,
+      name: "Other Fixture",
+      driver: "sandbox",
+      status: "active",
+      config: {
+        provider: "fake-plugin",
+        image: "fake:test",
+        reuseLease: false,
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await expect(svc.update(otherEnvironmentId, {
+      name: "Lease Fixture",
+    })).rejects.toMatchObject({
+      status: 409,
+      message: 'An environment named "Lease Fixture" already exists for this instance.',
+    });
+
+    const original = await svc.getById(environmentId);
+    expect(original?.name).toBe("Lease Fixture");
+  });
+
   it("rejects a second managed-sandbox row for the same company at the DB level", async () => {
     const companyId = randomUUID();
     await db.insert(companies).values({

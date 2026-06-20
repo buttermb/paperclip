@@ -8461,8 +8461,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const resolvedInstanceSettings = await instanceSettings.get();
     const environmentResolution = resolveExecutionWorkspaceEnvironmentId({
       agentDefaultEnvironmentId: agent.defaultEnvironmentId,
-      instanceDefaultEnvironmentId:
-        (resolvedInstanceSettings as { defaultEnvironmentId?: string | null }).defaultEnvironmentId ?? null,
+      instanceDefaultEnvironmentId: resolvedInstanceSettings.defaultEnvironmentId ?? null,
       localDefaultEnvironmentId: localEnvironment.id,
     });
     const shouldReuseExisting = requestedShouldReuseExisting;

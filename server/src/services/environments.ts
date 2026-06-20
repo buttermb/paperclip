@@ -15,6 +15,7 @@ import {
   type EnvironmentLeaseStatus,
   type UpdateEnvironment,
 } from "@paperclipai/shared";
+import { conflict } from "../errors.js";
 
 type EnvironmentRow = typeof environments.$inferSelect;
 type EnvironmentLeaseRow = typeof environmentLeases.$inferSelect;
@@ -70,6 +71,18 @@ function readEnum<T extends string>(value: string | null, allowed: readonly T[],
   throw new Error(`Unexpected ${fieldName} value: ${value}`);
 }
 
+function hasConstraintName(error: unknown, constraintName: string): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as {
+    constraint?: unknown;
+    constraint_name?: unknown;
+    cause?: unknown;
+  };
+  return candidate.constraint === constraintName
+    || candidate.constraint_name === constraintName
+    || hasConstraintName(candidate.cause, constraintName);
+}
+
 function toEnvironment(row: EnvironmentRow): Environment {
   return {
     id: row.id,
@@ -82,7 +95,7 @@ function toEnvironment(row: EnvironmentRow): Environment {
     metadata: cloneRecord(row.metadata),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-  } as unknown as Environment;
+  } as Environment;
 }
 
 type EnvironmentListFilters = {
@@ -294,7 +307,16 @@ export function environmentService(db: Db) {
             sql`${environments.driver} = 'sandbox' AND (${environments.metadata} ->> 'managedByPaperclip')::boolean = true`,
         })
         .returning()
-        .then((rows) => rows[0] ?? null);
+        .then((rows) => rows[0] ?? null)
+        .catch((error) => {
+          if (
+            hasConstraintName(error, "environments_name_idx")
+            || hasConstraintName(error, "environments_managed_sandbox_idx")
+          ) {
+            return null;
+          }
+          throw error;
+        });
       if (inserted) return toEnvironment(inserted);
 
       const winner = await db
@@ -359,7 +381,16 @@ export function environmentService(db: Db) {
           updatedAt: now,
         })
         .returning()
-        .then((rows) => rows[0] ?? null);
+        .then((rows) => rows[0] ?? null)
+        .catch((error) => {
+          if (hasConstraintName(error, "environments_name_idx")) {
+            throw conflict(`An environment named "${input.name}" already exists for this instance.`);
+          }
+          if (hasConstraintName(error, "environments_local_driver_idx")) {
+            throw conflict("A local environment already exists for this instance.");
+          }
+          throw error;
+        });
       if (!row) {
         throw new Error("Failed to create environment");
       }
@@ -385,7 +416,16 @@ export function environmentService(db: Db) {
         .set(values)
         .where(eq(environments.id, id))
         .returning()
-        .then((rows) => rows[0] ?? null);
+        .then((rows) => rows[0] ?? null)
+        .catch((error) => {
+          if (hasConstraintName(error, "environments_name_idx")) {
+            throw conflict(`An environment named "${patch.name}" already exists for this instance.`);
+          }
+          if (hasConstraintName(error, "environments_local_driver_idx")) {
+            throw conflict("A local environment already exists for this instance.");
+          }
+          throw error;
+        });
       return row ? toEnvironment(row) : null;
     },
 
