@@ -602,6 +602,37 @@ export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[numbe
 export const SECRET_ACCESS_OUTCOMES = ["success", "failure"] as const;
 export type SecretAccessOutcome = (typeof SECRET_ACCESS_OUTCOMES)[number];
 
+// Per-user "bring your own" subscription credentials for the official
+// Claude / Codex CLI binaries. Only these two providers are supported.
+export const SUBSCRIPTION_CREDENTIAL_PROVIDERS = ["claude", "codex"] as const;
+export type SubscriptionCredentialProvider = (typeof SUBSCRIPTION_CREDENTIAL_PROVIDERS)[number];
+
+// Provider-specific credential shapes that can be captured.
+// - claude_oauth_token: a raw CLAUDE_CODE_OAUTH_TOKEN string
+// - claude_credentials_json: a ~/.claude/.credentials.json-equivalent JSON document
+// - codex_auth_json: a ~/.codex/auth.json-equivalent JSON document
+export const SUBSCRIPTION_CREDENTIAL_KINDS = [
+  "claude_oauth_token",
+  "claude_credentials_json",
+  "codex_auth_json",
+] as const;
+export type SubscriptionCredentialKind = (typeof SUBSCRIPTION_CREDENTIAL_KINDS)[number];
+
+// Which credential kinds are valid for each provider.
+export const SUBSCRIPTION_CREDENTIAL_KINDS_BY_PROVIDER: Record<
+  SubscriptionCredentialProvider,
+  readonly SubscriptionCredentialKind[]
+> = {
+  claude: ["claude_oauth_token", "claude_credentials_json"],
+  codex: ["codex_auth_json"],
+};
+
+export const SUBSCRIPTION_CREDENTIAL_STATUSES = ["active", "disabled"] as const;
+export type SubscriptionCredentialStatus = (typeof SUBSCRIPTION_CREDENTIAL_STATUSES)[number];
+
+export const SUBSCRIPTION_CREDENTIAL_TEST_STATUSES = ["untested", "ready", "failed"] as const;
+export type SubscriptionCredentialTestStatus = (typeof SUBSCRIPTION_CREDENTIAL_TEST_STATUSES)[number];
+
 export const STORAGE_PROVIDERS = ["local_disk", "s3"] as const;
 export type StorageProvider = (typeof STORAGE_PROVIDERS)[number];
 

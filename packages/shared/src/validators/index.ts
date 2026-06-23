@@ -468,6 +468,17 @@ export {
 } from "./secret.js";
 
 export {
+  subscriptionCredentialProviderSchema,
+  subscriptionCredentialKindSchema,
+  subscriptionCredentialStatusSchema,
+  subscriptionCredentialTestStatusSchema,
+  upsertSubscriptionCredentialSchema,
+  subscriptionCredentialReadModelSchema,
+  type UpsertSubscriptionCredential,
+  type SubscriptionCredentialReadModel,
+} from "./subscription-credential.js";
+
+export {
   createRoutineSchema,
   updateRoutineSchema,
   createRoutineTriggerSchema,

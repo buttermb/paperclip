@@ -24,4 +24,5 @@ export const API = {
   joinRequests: `${API_PREFIX}/join-requests`,
   members: `${API_PREFIX}/members`,
   admin: `${API_PREFIX}/admin`,
+  subscriptionCredentials: `${API_PREFIX}/companies/:companyId/subscription-credentials`,
 } as const;
